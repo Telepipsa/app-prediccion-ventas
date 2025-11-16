@@ -34,6 +34,50 @@ st.set_page_config(
     layout="wide"
 )
 
+# **NUEVO: CSS Personalizado para Responsividad en Móvil**
+# Inyectamos CSS para mejorar el layout en móvil: full width, reduce tamaños, oculta modebar en Plotly para más espacio
+st.markdown("""
+<style>
+    /* Mejoras generales para responsividad */
+    .main .block-container {
+        padding-top: 1rem;
+        padding-right: 1rem;
+        padding-left: 1rem;
+    }
+    
+    /* Para móvil: full width en contenedores, reduce fonts y paddings */
+    @media (max-width: 768px) {
+        .main .block-container {
+            padding-left: 0.5rem;
+            padding-right: 0.5rem;
+        }
+        .streamlit-expanderHeader {
+            font-size: 0.9em;
+            padding: 0.5rem;
+        }
+        section[data-testid="stHorizontalBlock"] {
+            width: 100% !important;
+            margin: 0;
+        }
+        /* Asegurar que las métricas y dataframes se adapten */
+        [data-testid="column"] {
+            width: 100% !important;
+        }
+        /* Reducir altura de dataframes en móvil para scroll */
+        [data-testid="dataFrame"] {
+            max-height: 400px;
+        }
+    }
+    
+    /* Para forzar un layout más 'desktop-like' en móvil: aumentar zoom base */
+    @media (max-width: 768px) {
+        html {
+            zoom: 1.1;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- Constantes y Variables Globales ---
 COSTO_HORA_PERSONAL = 11.9
 # **CAMBIO CLAVE: Unificación de archivos de ventas en uno solo**
@@ -1556,10 +1600,23 @@ if display_results:
     df_prediccion = st.session_state.df_prediccion
 
     # ** FIX ZOOM: Configuración de Plotly para Scroll Zoom **
+    # **NUEVO: Configuración condicional para móvil - Deshabilita modebar y hover unificado para más espacio**
     plotly_config = {
         'scrollZoom': True, # Activa el zoom con la rueda del ratón
-        'displayModeBar': True # Asegura que la barra de herramientas (incluyendo el botón de zoom) esté visible
+        'displayModeBar': False,  # Oculta la barra de herramientas en móvil para más espacio (se activa con CSS si es desktop)
     }
+    # CSS adicional para mostrar modebar solo en desktop
+    st.markdown("""
+    <style>
+    @media (min-width: 769px) {
+        .js-plotly-plot .modebar { display: block !important; }
+    }
+    @media (max-width: 768px) {
+        .js-plotly-plot .modebar { display: none !important; }
+        .plotly .plotlyjs-hover { font-size: 0.8em; }  /* Reduce tamaño de hover en móvil */
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     # Pasar los DataFrames correctos al generador de gráficos
     # FIX APLICADO: Pasar el año real de la base (BASE_YEAR) y fecha_ini_current a la función para etiquetar correctamente
