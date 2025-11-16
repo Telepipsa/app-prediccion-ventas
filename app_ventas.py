@@ -67,6 +67,20 @@ st.markdown("""
         [data-testid="dataFrame"] {
             max-height: 400px;
         }
+        /* NUEVO: Gráficas en móvil ocupan toda la página */
+        .plotly-chart {
+            width: 100vw !important;
+            height: 80vh !important;
+            position: relative;
+            left: 50%;
+            right: 50%;
+            margin-left: -50vw;
+            margin-right: -50vw;
+        }
+        /* Ocultar expanders no esenciales en móvil para más espacio */
+        .streamlit-expander {
+            margin-bottom: 0.5rem;
+        }
     }
     
     /* Para forzar un layout más 'desktop-like' en móvil: aumentar zoom base */
@@ -74,6 +88,14 @@ st.markdown("""
         html {
             zoom: 1.1;
         }
+    }
+    /* Mostrar modebar solo en desktop */
+    @media (min-width: 769px) {
+        .js-plotly-plot .modebar { display: block !important; }
+    }
+    @media (max-width: 768px) {
+        .js-plotly-plot .modebar { display: none !important; }
+        .plotly .plotlyjs-hover { font-size: 0.8em; }  /* Reduce tamaño de hover en móvil */
     }
 </style>
 """, unsafe_allow_html=True)
@@ -808,25 +830,52 @@ def optimizar_coste_personal(df_prediccion):
 
 # --- Funciones de Visualización (Sin Cambios significativos, solo nombres de columnas) ---
 
-def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_range, base_year_label, fecha_ini_current):
+def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_range, base_year_label, fecha_ini_current, is_mobile=False):
     """
     Genera un gráfico de líneas comparativo (Año Base, Año Actual Real, Predicción)
     para el rango de fechas seleccionado (4 semanas históricas + 1 semana predicha).
     
     :param base_year_label: El año real de origen de los datos de base histórica.
     :param fecha_ini_current: La fecha de inicio del rango histórico (lunes 4 semanas antes).
+    :param is_mobile: Si True, limita la visualización solo a la semana de predicción (7 días).
     """
     
     fig = make_subplots(specs=[[{"secondary_y": False}]])
     
-    # 1. Datos Año Base (Azul) - Ya tiene el índice ajustado al Año Actual
-    base_year_display = base_year_label if not df_hist_base_equiv.empty else 'Base'
+    # NUEVO: Si es móvil, filtrar datos solo a la semana de predicción
+    if is_mobile and not df_pred_sem.empty:
+        week_start = df_pred_sem.index.min()
+        week_end = df_pred_sem.index.max()
+        df_hist_base_equiv_mobile = df_hist_base_equiv[(df_hist_base_equiv.index >= week_start) & (df_hist_base_equiv.index <= week_end)] if not df_hist_base_equiv.empty else pd.DataFrame()
+        df_hist_current_range_mobile = df_hist_current_range[(df_hist_current_range.index >= week_start) & (df_hist_current_range.index <= week_end)]
+        all_dates = df_pred_sem.index
+        x_min = week_start - timedelta(days=1)
+        x_max = week_end + timedelta(days=1)
+    else:
+        df_hist_base_equiv_mobile = df_hist_base_equiv
+        df_hist_current_range_mobile = df_hist_current_range
+        all_dates = pd.Index([])
+        if not df_hist_current_range.empty:
+            all_dates = all_dates.union(df_hist_current_range.index)
+        if not df_hist_base_equiv.empty:
+            all_dates = all_dates.union(df_hist_base_equiv.index)
+        if not df_pred_sem.empty:
+            all_dates = all_dates.union(df_pred_sem.index)
+        if not all_dates.empty:
+            x_min = all_dates.min() - timedelta(days=1)
+            x_max = all_dates.max() + timedelta(days=1)
+        else:
+            x_min = df_pred_sem.index.min() if not df_pred_sem.empty else datetime.today()
+            x_max = df_pred_sem.index.max() if not df_pred_sem.empty else datetime.today() + timedelta(days=7)
     
-    if not df_hist_base_equiv.empty:
+    # 1. Datos Año Base (Azul) - Ya tiene el índice ajustado al Año Actual
+    base_year_display = base_year_label if not df_hist_base_equiv_mobile.empty else 'Base'
+    
+    if not df_hist_base_equiv_mobile.empty:
         fig.add_trace(
             go.Scatter(
-                x=df_hist_base_equiv.index, 
-                y=df_hist_base_equiv['ventas'], 
+                x=df_hist_base_equiv_mobile.index, 
+                y=df_hist_base_equiv_mobile['ventas'], 
                 # FIX APLICADO: Usar el año real de la base para la etiqueta
                 name=f'Ventas Año Base ({base_year_display} Equivalente Alineado)',
                 mode='lines+markers',
@@ -835,14 +884,14 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             secondary_y=False
         )
 
-    # 2. Datos Reales Año Actual (Verde) - Rango histórico completo
-    current_year = df_hist_current_range.index.year.min() if not df_hist_current_range.empty else 'Actual'
-    if not df_hist_current_range.empty:
+    # 2. Datos Reales Año Actual (Verde) - Rango histórico completo o filtrado
+    current_year = df_hist_current_range_mobile.index.year.min() if not df_hist_current_range_mobile.empty else 'Actual'
+    if not df_hist_current_range_mobile.empty:
         # Trazar la línea de Ventas Reales (cubre las 4 semanas históricas + días reales de la semana de predicción)
         fig.add_trace(
             go.Scatter(
-                x=df_hist_current_range.index, 
-                y=df_hist_current_range['ventas'], 
+                x=df_hist_current_range_mobile.index, 
+                y=df_hist_current_range_mobile['ventas'], 
                 name=f'Ventas Reales Año Actual ({current_year} Histórico)',
                 mode='lines+markers',
                 line=dict(color='green', width=3)
@@ -853,51 +902,52 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
     
     if not df_pred_sem.empty: 
         
-        # 3. Predicción Pura (Naranja Punteado)
-        # Recalcular la predicción pura para el rango histórico de 4 semanas ANTES de la seleccionada.
-        
-        # Generar rango completo histórico de 4 semanas (28 días)
-        start_hist = fecha_ini_current
-        end_hist = start_hist + timedelta(weeks=4) - timedelta(days=1)
-        historico_full_range = pd.date_range(start=start_hist, end=end_hist, freq='D')
-        
-        predicciones_historicas_puras = []
-        # **FIX: Calcular por semanas alineadas (4 lunes históricos)**
-        # Asumiendo fecha_ini_current es lunes
-        for j in range(4):
-            monday_hist = fecha_ini_current + timedelta(weeks=j)
-            df_temp = calcular_prediccion_semana(monday_hist.date()) 
+        # 3. Predicción Pura (Naranja Punteado) - Solo si no es móvil o limitada
+        if not is_mobile:
+            # Recalcular la predicción pura para el rango histórico de 4 semanas ANTES de la seleccionada.
             
-            if not df_temp.empty:
-                for idx, row in df_temp.iterrows():
-                    idx_pd = pd.to_datetime(idx)
-                    # Añadir sin condición de ventas reales, para cubrir todos los días del rango histórico
-                    try:
-                        predicciones_historicas_puras.append({
-                            'fecha': idx_pd,
-                            'prediccion_pura': row['prediccion_pura']
-                        })
-                    except KeyError:
-                        continue
-        
-        # Unimos las predicciones puras históricas con las de la semana seleccionada
-        df_pura_historica = pd.DataFrame(predicciones_historicas_puras).set_index('fecha')
-        
-        # Combinar
-        df_pura_plot = pd.concat([df_pura_historica[['prediccion_pura']], df_pred_sem[['prediccion_pura']]]).sort_index()
-        df_pura_plot = df_pura_plot[~df_pura_plot.index.duplicated(keep='first')]
+            # Generar rango completo histórico de 4 semanas (28 días)
+            start_hist = fecha_ini_current
+            end_hist = start_hist + timedelta(weeks=4) - timedelta(days=1)
+            historico_full_range = pd.date_range(start=start_hist, end=end_hist, freq='D')
+            
+            predicciones_historicas_puras = []
+            # **FIX: Calcular por semanas alineadas (4 lunes históricos)**
+            # Asumiendo fecha_ini_current es lunes
+            for j in range(4):
+                monday_hist = fecha_ini_current + timedelta(weeks=j)
+                df_temp = calcular_prediccion_semana(monday_hist.date()) 
+                
+                if not df_temp.empty:
+                    for idx, row in df_temp.iterrows():
+                        idx_pd = pd.to_datetime(idx)
+                        # Añadir sin condición de ventas reales, para cubrir todos los días del rango histórico
+                        try:
+                            predicciones_historicas_puras.append({
+                                'fecha': idx_pd,
+                                'prediccion_pura': row['prediccion_pura']
+                            })
+                        except KeyError:
+                            continue
+            
+            # Unimos las predicciones puras históricas con las de la semana seleccionada
+            df_pura_historica = pd.DataFrame(predicciones_historicas_puras).set_index('fecha')
+            
+            # Combinar
+            df_pura_plot = pd.concat([df_pura_historica[['prediccion_pura']], df_pred_sem[['prediccion_pura']]]).sort_index()
+            df_pura_plot = df_pura_plot[~df_pura_plot.index.duplicated(keep='first')]
 
-        fig.add_trace(
-            go.Scatter(
-                x=df_pura_plot.index, 
-                y=df_pura_plot['prediccion_pura'], 
-                name='Predicción Pura (Sin Ajuste)',
-                mode='lines',
-                line=dict(color='orange', width=1.5, dash='dash')
-            ),
-            secondary_y=False
-        )
-        
+            fig.add_trace(
+                go.Scatter(
+                    x=df_pura_plot.index, 
+                    y=df_pura_plot['prediccion_pura'], 
+                    name='Predicción Pura (Sin Ajuste)',
+                    mode='lines',
+                    line=dict(color='orange', width=1.5, dash='dash')
+                ),
+                secondary_y=False
+            )
+
         # 4. Predicción Final (Rojo Punteado) - Solo la semana seleccionada (Futuro/Ajustado)
         fig.add_trace(
             go.Scatter(
@@ -932,23 +982,6 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             )
     
     # 6. Configuración del Eje X para cubrir todo el rango de visualización
-    all_dates = pd.Index([])
-    if not df_hist_current_range.empty:
-        all_dates = all_dates.union(df_hist_current_range.index)
-    if not df_hist_base_equiv.empty:
-        all_dates = all_dates.union(df_hist_base_equiv.index)
-    if not df_pred_sem.empty:
-        all_dates = all_dates.union(df_pred_sem.index)
-        
-    if not all_dates.empty:
-        x_min = all_dates.min() - timedelta(days=1)
-        x_max = all_dates.max() + timedelta(days=1)
-    else:
-        # Rango por defecto si no hay datos
-        x_min = df_pred_sem.index.min() if not df_pred_sem.empty else datetime.today()
-        x_max = df_pred_sem.index.max() if not df_pred_sem.empty else datetime.today() + timedelta(days=7)
-
-    # **NUEVA CONFIGURACIÓN: Etiquetas día a día con día de la semana**
     if not all_dates.empty:
         tickvals = [pd.to_datetime(d) for d in all_dates]
         ticktext = [f"{d.day} {DIAS_SEMANA[d.weekday()][:3]}" for d in all_dates]
@@ -961,11 +994,19 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
         xaxis_title='Fecha',
         yaxis_title='Ventas (€)',
         hovermode="x unified",
-        xaxis_range=[x_min, x_max],  # Asegura que el eje X cubra las 5 semanas
+        xaxis_range=[x_min, x_max],  # Asegura que el eje X cubra las 5 semanas o solo la semana
         xaxis=dict(
             tickvals=tickvals,
             ticktext=ticktext,
             tickangle=-45
+        ),
+        # NUEVO: Leyenda horizontal encima de la gráfica
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5
         )
     )
     
@@ -1088,6 +1129,14 @@ def generar_grafico_barras_dias(df_pred, df_hist_base_equiv):
         xaxis_tickangle=-45,
         uniformtext_minsize=10, 
         uniformtext_mode='hide',
+        # NUEVO: Leyenda horizontal encima de la gráfica
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5
+        )
     )
     
     return fig
@@ -1291,6 +1340,10 @@ if st.session_state.get("show_delete_modal", False):
 # =============================================================================
 
 st.title("📊 Panel de Predicción y Optimización de Personal")
+
+# NUEVO: Checkbox para vista compacta (móvil) en sidebar para facilitar el uso en móvil
+with st.sidebar:
+    vista_compacta = st.checkbox("👉 Vista Compacta (solo 7 días en gráfica de líneas - recomendado para móvil)", value=False, help="Activa para ver solo la semana de predicción en la gráfica de líneas, ideal para pantallas pequeñas.")
 
 # --- Sección de Predicción y Optimización ---
 st.header("Selección y Cálculo Semanal")
@@ -1605,27 +1658,17 @@ if display_results:
         'scrollZoom': True, # Activa el zoom con la rueda del ratón
         'displayModeBar': False,  # Oculta la barra de herramientas en móvil para más espacio (se activa con CSS si es desktop)
     }
-    # CSS adicional para mostrar modebar solo en desktop
-    st.markdown("""
-    <style>
-    @media (min-width: 769px) {
-        .js-plotly-plot .modebar { display: block !important; }
-    }
-    @media (max-width: 768px) {
-        .js-plotly-plot .modebar { display: none !important; }
-        .plotly .plotlyjs-hover { font-size: 0.8em; }  /* Reduce tamaño de hover en móvil */
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
     # Pasar los DataFrames correctos al generador de gráficos
     # FIX APLICADO: Pasar el año real de la base (BASE_YEAR) y fecha_ini_current a la función para etiquetar correctamente
+    # NUEVO: Pasar vista_compacta como is_mobile
     fig_lineas = generar_grafico_prediccion(
         df_prediccion, 
         df_base_graf, 
         df_current_graf,
         base_year_label=BASE_YEAR,  # Nuevo argumento para la etiqueta del año
-        fecha_ini_current=fecha_ini_current  # Nuevo para cálculo de puras históricas
+        fecha_ini_current=fecha_ini_current,  # Nuevo para cálculo de puras históricas
+        is_mobile=vista_compacta
     )
     st.plotly_chart(fig_lineas, use_container_width=True, config=plotly_config) 
     
