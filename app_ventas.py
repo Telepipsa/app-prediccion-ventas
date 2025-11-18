@@ -1198,6 +1198,37 @@ if uploader_historico:
         guardar_datos('ventas') # Guardar en el nuevo archivo único
         st.sidebar.success("Datos históricos cargados y guardados.")
 
+# --- INICIO DE LA NUEVA FUNCIONALIDAD ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("##### Añadir / Editar Venta Manual")
+with st.sidebar.form("form_venta_manual"):
+    fecha_manual = st.date_input("Fecha", value=datetime.today().date())
+    ventas_manual = st.number_input("Venta neta (€)", min_value=0.0, step=0.01, format="%.2f")
+    submitted_manual = st.form_submit_button("Guardar Venta")
+
+    if submitted_manual:
+        fecha_pd = pd.to_datetime(fecha_manual)
+        
+        # Acceder al dataframe (asegurándose que existe)
+        df_hist = st.session_state.get('df_historico', pd.DataFrame(columns=['ventas']))
+        if not isinstance(df_hist, pd.DataFrame):
+             df_hist = pd.DataFrame(columns=['ventas'])
+             
+        df_hist.index.name = 'fecha'
+
+        # Añadir o actualizar la fila
+        df_hist.loc[fecha_pd] = {'ventas': ventas_manual}
+        
+        # Re-ordenar y guardar en session_state
+        st.session_state.df_historico = df_hist.sort_index()
+        
+        guardar_datos('ventas')
+        
+        st.sidebar.success(f"Venta de €{ventas_manual:.2f} guardada/actualizada para {fecha_manual.strftime('%Y-%m-%d')}.")
+        st.rerun()
+# --- FIN DE LA NUEVA FUNCIONALIDAD ---
+
+
 # Editor de Datos en Expander
 with st.sidebar.expander("Ver / Editar Datos Históricos (Guardado automático)"):
     st.markdown("##### Todos los Datos de Ventas (Histórico)")
