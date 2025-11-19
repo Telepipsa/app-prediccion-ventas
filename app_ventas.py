@@ -34,7 +34,7 @@ st.set_page_config(
     page_title="Optimización de Ventas y Personal",
     page_icon="📈",
     layout="wide"
-)
+) 
 
 # **NUEVO: CSS Personalizado para Responsividad en Móvil**
 # Inyectamos CSS para mejorar el layout en móvil: full width, reduce tamaños, oculta modebar en Plotly para más espacio
@@ -218,7 +218,7 @@ def get_daily_limits(ventas_dia, dia_semana_num):
 # --- Funciones de Utilidad (Datos) ---
 
 def cargar_datos_persistentes():
-    """Carga los datos guardados en archivos locales al iniciar la sesión."""
+    """Carga los datos guardados en archivos locales al iniciar la sesión.""" 
     if 'datos_cargados' not in st.session_state:
         # Inicialización del DataFrame unificado
         st.session_state.df_historico = pd.DataFrame(columns=['ventas'])
@@ -253,7 +253,7 @@ def cargar_datos_persistentes():
         # Inicializa la fecha de último cálculo para evitar que se muestre una gráfica si no hay nada
         if 'last_calculated_date' not in st.session_state:
              st.session_state.last_calculated_date = None
-
+             
 
 def guardar_datos(tipo):
     """Guarda el dataframe unificado o dict de eventos en su archivo correspondiente."""
@@ -1123,9 +1123,54 @@ def to_excel(df_pred, df_opt):
     processed_data = output.getvalue()
     return processed_data
 
+def mostrar_indicador_crecimiento():
+    """
+    Muestra un indicador flotante con el porcentaje de crecimiento de ventas entre el año actual y el anterior.
+    El color varía según el umbral de crecimiento. Incluye un tooltip con la diferencia en euros.
+    """
+    df = st.session_state.get('df_historico', pd.DataFrame())
+
+    if not df.empty:
+        current_year = datetime.now().year
+        previous_year = current_year - 1
+
+        # Última fecha con datos del año actual
+        fecha_limite_actual = df[df.index.year == current_year].index.max()
+
+        if fecha_limite_actual:
+            inicio_actual = datetime(current_year, 1, 1)
+            inicio_anterior = datetime(previous_year, 1, 1)
+            fin_anterior = fecha_limite_actual.replace(year=previous_year)
+
+            ventas_actual = df[(df.index >= inicio_actual) & (df.index <= fecha_limite_actual)]['ventas'].sum()
+            ventas_anterior = df[(df.index >= inicio_anterior) & (df.index <= fin_anterior)]['ventas'].sum()
+
+            if ventas_anterior > 0:
+                variacion_pct = ((ventas_actual - ventas_anterior) / ventas_anterior) * 100
+            delta_euros = ventas_actual - ventas_anterior
+            flecha = "↑" if variacion_pct >= 0 else "↓" 
+            # Umbrales de color
+            if variacion_pct < 0:
+                color = "red"
+            elif variacion_pct < 5:
+                color = "#e6b800"  # amarillo suave
+            elif variacion_pct < 15:
+                color = "green"
+            else:
+                color = "#006400"  # verde oscuro
+
+            st.markdown(f"""
+            <div style='position: absolute; top:20px; right:20px; background-color:#f9f9f9; padding:10px 20px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.2); z-index:9999; font-size:20px; color:{color}; font-weight:bold;' title='Diferencia: {delta_euros:,.0f}€'>
+                {flecha} {variacion_pct:.1f}%
+            </div>
+            """, unsafe_allow_html=True)
+
+
+ 
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
+mostrar_indicador_crecimiento() 
 
 
 # =============================================================================
@@ -1713,10 +1758,10 @@ if display_results:
         fecha_ini_current=fecha_ini_current,
         is_mobile=vista_compacta
     )
-    st.plotly_chart(fig_lineas, use_container_width=True, config=plotly_config) 
+    st.plotly_chart(fig_lineas, width="stretch", config=plotly_config) 
     
     fig_barras = generar_grafico_barras_dias(df_prediccion, df_base_week)
-    st.plotly_chart(fig_barras, use_container_width=True, config=plotly_config) 
+    st.plotly_chart(fig_barras, width="stretch", config=plotly_config) 
 
 # --- Página de Inicio (si no se ha pulsado el botón o el resultado es 'stale') ---
 if not display_results:
