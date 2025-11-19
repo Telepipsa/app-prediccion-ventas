@@ -379,57 +379,58 @@ def calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8):
     
     return factor_tendencia
 
-def es_festivo_o_evento(fecha_dt, eventos_dict):
-    fecha_str = fecha_dt.strftime('%Y-%m-%d')
-    if fecha_dt in festivos_es:
-        return True
-    if fecha_str in eventos_dict:
-        return True
-    return False
+def es_festivo(fecha_dt):
+    return fecha_dt in festivos_es
 
-def es_vispera_de_festivo_evento(fecha_dt, eventos_dict):
+def es_evento_manual(fecha_dt, eventos_dict):
+    fecha_str = fecha_dt.strftime('%Y-%m-%d')
+    return fecha_str in eventos_dict
+
+def es_vispera_de_festivo(fecha_dt):
     siguiente = fecha_dt + timedelta(days=1)
-    return es_festivo_o_evento(siguiente, eventos_dict)
+    return es_festivo(siguiente)
+
 
 def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
     """
     Reglas:
-    - Si fecha_actual es festivo/evento o víspera de festivo/evento -> usar misma fecha exacta del año base.
-    - Si no, usar media mensual del día de la semana en año base excluyendo festivos/eventos.
+    - Si es festivo o víspera de festivo -> usar misma fecha exacta del año base.
+    - Si es evento manual (ej. fútbol) o día normal -> usar media mensual del mismo día de semana,
+      excluyendo festivos y eventos del año base.
     """
-    base_year = fecha_actual.year - 1  # CAMBIO: comparar siempre con el año anterior
+    base_year = fecha_actual.year - 1
     fecha_base_exacta = fecha_actual.replace(year=base_year)
     fecha_str_base = fecha_base_exacta.strftime('%Y-%m-%d')
 
-    if es_festivo_o_evento(fecha_actual, eventos_dict) or es_vispera_de_festivo_evento(fecha_actual, eventos_dict):
-        # Comparación con misma fecha exacta
+    # Caso 1: Festivo o víspera de festivo -> fecha exacta
+    if es_festivo(fecha_actual) or es_vispera_de_festivo(fecha_actual):
         if fecha_base_exacta in df_base.index:
             return df_base.loc[fecha_base_exacta, 'ventas'], fecha_str_base
-        else:
-            # Fallback: media mensual del mismo día de la semana (excluyendo festivos/eventos)
-            mes = fecha_actual.month
-            dia_semana_num = fecha_actual.weekday()
-            df_mes = df_base[df_base.index.month == mes].copy()
-            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
-            # Festivos del año base
-            festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
-            mask_no_festivo = ~df_mes.index.isin(festivos_base)
-            df_mes_sano = df_mes[mask_no_event & mask_no_festivo]
-            ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
-            return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
-    else:
-        # Media mensual por día de semana excluyendo festivos/eventos
+        # Fallback: media mensual del mismo día de semana excluyendo festivos/eventos
         mes = fecha_actual.month
         dia_semana_num = fecha_actual.weekday()
         df_mes = df_base[df_base.index.month == mes].copy()
-        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
         festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
         mask_no_festivo = ~df_mes.index.isin(festivos_base)
-        df_mes_sano = df_mes[mask_no_event & mask_no_festivo]
+        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+        df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
         ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
-        if pd.isna(ventas_base):
-            return 0.0, fecha_str_base
-        return ventas_base, fecha_str_base
+        return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
+
+    # Caso 2: Evento manual y día normal -> media mensual por día de semana (sin forzar fecha exacta)
+    mes = fecha_actual.month
+    dia_semana_num = fecha_actual.weekday()
+    df_mes = df_base[df_base.index.month == mes].copy()
+    festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+    mask_no_festivo = ~df_mes.index.isin(festivos_base)
+    mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+    df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
+    ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
+    if pd.isna(ventas_base):
+        return 0.0, fecha_str_base
+    return ventas_base, fecha_str_base
+
+
         
         
 # NUEVA FUNCIÓN: obtener el día exacto del año anterior
