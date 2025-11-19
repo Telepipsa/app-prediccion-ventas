@@ -26,6 +26,8 @@ import holidays
 import pulp
 from io import BytesIO
 import numpy as np  # Añadido para cálculos de tendencia
+import urllib.parse
+import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -348,7 +350,6 @@ def datos_listos_para_prediccion():
         'df_historico' in st.session_state and not st.session_state.df_historico.empty
     )
 
-
 def calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8):
     """
     Calcula la tendencia lineal de las ventas para un día de la semana en las últimas num_semanas.
@@ -378,14 +379,91 @@ def calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8):
     
     return factor_tendencia
 
+def es_festivo_o_evento(fecha_dt, eventos_dict):
+    fecha_str = fecha_dt.strftime('%Y-%m-%d')
+    if fecha_dt in festivos_es:
+        return True
+    if fecha_str in eventos_dict:
+        return True
+    return False
+
+def es_vispera_de_festivo_evento(fecha_dt, eventos_dict):
+    siguiente = fecha_dt + timedelta(days=1)
+    return es_festivo_o_evento(siguiente, eventos_dict)
+
+def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
+    """
+    Reglas:
+    - Si fecha_actual es festivo/evento o víspera de festivo/evento -> usar misma fecha exacta del año base.
+    - Si no, usar media mensual del día de la semana en año base excluyendo festivos/eventos.
+    """
+    base_year = fecha_actual.year - 1  # CAMBIO: comparar siempre con el año anterior
+    fecha_base_exacta = fecha_actual.replace(year=base_year)
+    fecha_str_base = fecha_base_exacta.strftime('%Y-%m-%d')
+
+    if es_festivo_o_evento(fecha_actual, eventos_dict) or es_vispera_de_festivo_evento(fecha_actual, eventos_dict):
+        # Comparación con misma fecha exacta
+        if fecha_base_exacta in df_base.index:
+            return df_base.loc[fecha_base_exacta, 'ventas'], fecha_str_base
+        else:
+            # Fallback: media mensual del mismo día de la semana (excluyendo festivos/eventos)
+            mes = fecha_actual.month
+            dia_semana_num = fecha_actual.weekday()
+            df_mes = df_base[df_base.index.month == mes].copy()
+            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+            # Festivos del año base
+            festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+            mask_no_festivo = ~df_mes.index.isin(festivos_base)
+            df_mes_sano = df_mes[mask_no_event & mask_no_festivo]
+            ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
+            return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
+    else:
+        # Media mensual por día de semana excluyendo festivos/eventos
+        mes = fecha_actual.month
+        dia_semana_num = fecha_actual.weekday()
+        df_mes = df_base[df_base.index.month == mes].copy()
+        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+        festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+        mask_no_festivo = ~df_mes.index.isin(festivos_base)
+        df_mes_sano = df_mes[mask_no_event & mask_no_festivo]
+        ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
+        if pd.isna(ventas_base):
+            return 0.0, fecha_str_base
+        return ventas_base, fecha_str_base
+        
+        
+# NUEVA FUNCIÓN: obtener el día exacto del año anterior
+def obtener_dia_base_historica(fecha_actual, df_historico):
+    """
+    Devuelve la fecha exacta del año anterior en el CSV que corresponde
+    al mismo día de la semana y mes que la fecha_actual.
+    """
+    fecha_actual = pd.to_datetime(fecha_actual)
+    base_year = fecha_actual.year - 1
+    dia_semana = fecha_actual.weekday()
+    mes = fecha_actual.month
+
+    # Filtramos el histórico al año anterior, mismo mes y mismo día de semana
+    df_base = df_historico[(df_historico.index.year == base_year) &
+                           (df_historico.index.month == mes) &
+                           (df_historico.index.weekday == dia_semana)]
+
+    if not df_base.empty:
+        # Seleccionamos la fecha más cercana al mismo día del mes
+        fecha_objetivo = fecha_actual.replace(year=base_year)
+        pos = df_base.index.get_indexer([fecha_objetivo], method='nearest')[0]
+        fecha_base = df_base.index[pos]
+        ventas_base = df_base.loc[fecha_base, 'ventas']
+        return fecha_base.strftime('%Y-%m-%d'), ventas_base
+    else:
+        return None, None
+
 
 def calcular_prediccion_semana(fecha_inicio_semana_date):
     """
     Calcula la predicción de ventas para una semana específica de forma dinámica.
-    Modelo MEJORADO: 40% (Ventas Año Base, alineado por semana equivalente) + 60% (Media 4 semanas previas Año Actual ajustada por tendencia reciente de 8 semanas).
-    La tendencia ahora se aplica directamente a la media reciente para mayor impacto realista.
-    NUEVO: Ajuste por rendimiento YTD (Year-to-Date) comparando ventas acumuladas hasta la fecha actual vs. año base.
-    NUEVO: Ajuste por tendencia intra-mes (decay hacia fin de mes), excluyendo días de eventos, basado en promedios por semana del mes.
+    Modelo MEJORADO: 40% (Base histórica con reglas de festivo/víspera exacta o media mensual por día de semana excluyendo festivos/eventos) + 60% (Media 4 semanas previas Año Actual ajustada por tendencia reciente).
+    Ajustes: YTD y decay intra-mes.
     """
     
     # 1. Configuración de Fechas y Años
@@ -396,9 +474,8 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
     else:
         fecha_inicio_semana = datetime.combine(fecha_inicio_semana_date, datetime.min.time())
     
-    # ** CÁLCULO DINÁMICO DE AÑOS **
     CURRENT_YEAR = fecha_inicio_semana.year
-    BASE_YEAR = CURRENT_YEAR - 1 # Año anterior para la base histórica (40%)
+    BASE_YEAR = CURRENT_YEAR - 1
 
     predicciones = []
     
@@ -408,22 +485,16 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
     if df_historico.empty:
         return pd.DataFrame()
 
-    # 2. Filtrar DataFrames de trabajo
-    # Dataframe del Año Base (e.g., 2024 si predecimos 2025)
+    # Dataframe del Año Base
     df_base = df_historico[df_historico.index.year == BASE_YEAR].copy()
 
-    # Dataframe Histórico del Año Actual ANTES de la fecha de inicio
+    # Histórico del Año Actual antes de la fecha de inicio
     df_current_hist = df_historico[
         (df_historico.index.year == CURRENT_YEAR) & 
         (df_historico.index < fecha_inicio_semana)
     ]
     
-    # **NUEVA LÓGICA: Alinear semana base por posición en el calendario - CAMBIO: Buscar el LUNES SIGUIENTE**
-    fecha_equiv_inicio = fecha_inicio_semana.replace(year=BASE_YEAR)
-    dias_hasta_proximo_lunes = (7 - fecha_equiv_inicio.weekday()) % 7  # 0 si ya es lunes, sino días hasta el siguiente
-    fecha_inicio_base = fecha_equiv_inicio + timedelta(days=dias_hasta_proximo_lunes)
-
-    # NUEVO: Calcular factor YTD (Year-to-Date)
+    # YTD
     ytd_factor = 1.0
     if not df_current_hist.empty:
         last_date_current = df_current_hist.index.max()
@@ -442,12 +513,11 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         
         if ytd_base > 0:
             ytd_factor = ytd_current / ytd_base
-            ytd_factor = np.clip(ytd_factor, 0.7, 1.3)  # Limitar a rango razonable
+            ytd_factor = np.clip(ytd_factor, 0.7, 1.3)
 
-    # NUEVO: Calcular factores de decay intra-mes (global por semana del mes, excluyendo eventos)
+    # Decay intra-mes global
     decay_factors = {}
     if not df_historico.empty:
-        # Excluir días de eventos conocidos
         event_dates_str = list(eventos.keys())
         non_event_df = df_historico[~df_historico.index.astype(str).isin(event_dates_str)].copy()
         if not non_event_df.empty:
@@ -457,125 +527,101 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             for wom in range(1, 6):
                 avg_wom = global_avg_wom.get(wom, first_wom_avg)
                 decay_factor = avg_wom / first_wom_avg if first_wom_avg > 0 else 1.0
-                decay_factors[wom] = np.clip(decay_factor, 0.8, 1.2)  # Limitar a rango razonable
+                decay_factors[wom] = np.clip(decay_factor, 0.8, 1.2)
     
     # 3. Bucle para los 7 días de la semana
     for i in range(7):
         fecha_actual = fecha_inicio_semana + timedelta(days=i)
         fecha_str = fecha_actual.strftime('%Y-%m-%d')
         dia_semana_num = fecha_actual.weekday() # Lunes=0, Domingo=6
-        
-        # 3a. Base (40%) - Venta del día equivalente en la SEMANA ALINEADA del BASE_YEAR
-        fecha_base_i = fecha_inicio_base + timedelta(days=i)
-        fecha_base_str = fecha_base_i.strftime('%Y-%m-%d')
-        ventas_base = 0.0
-
-        if fecha_base_i in df_base.index:
-            ventas_base = df_base.loc[fecha_base_i, 'ventas']
-        else:
-            # Fallback: media de ese día de la semana en el BASE_YEAR
-            ventas_base = df_base[df_base.index.weekday == dia_semana_num]['ventas'].mean()
-        
+        fecha_base_historica, ventas_base_historica = obtener_dia_base_historica(fecha_actual, df_historico)
+        # Base histórica según reglas nuevas
+        ventas_base, fecha_base_str = calcular_base_historica_para_dia(fecha_actual, df_base, eventos)
         if pd.isna(ventas_base): ventas_base = 0.0
 
-        # 3b. Reciente (60%) - Media de las últimas 4 semanas de ese día de la semana en el CURRENT_YEAR (histórico)
+        # Media 4 semanas recientes del mismo día semana en CURRENT_YEAR
         ultimas_4_semanas = df_current_hist[
             df_current_hist.index.weekday == dia_semana_num
         ].sort_index(ascending=False).head(4)
-        
-        media_reciente_current = 0.0
-        if not ultimas_4_semanas.empty:
-            media_reciente_current = ultimas_4_semanas['ventas'].mean()
-        else:
-            # Si no hay datos recientes, usa la base como fallback para el 60%
-            media_reciente_current = ventas_base 
-            
+        media_reciente_current = ultimas_4_semanas['ventas'].mean() if not ultimas_4_semanas.empty else ventas_base
         if pd.isna(media_reciente_current): media_reciente_current = 0.0
         
-        # 3c. Tendencia reciente - Factor de ajuste basado en 8 semanas (aplicado a la media reciente)
+        # Tendencia reciente
         factor_tendencia = calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8)
         
-        # 3d. Cálculo Ponderado MEJORADO (PREDICCIÓN PURA DEL MODELO) - Tendencia aplicada a la componente reciente para mayor impacto
+        # Predicción base ponderada
         media_ajustada_tendencia = media_reciente_current * factor_tendencia
-        prediccion_base = (ventas_base * 0.4) + (media_ajustada_tendencia * 0.6)
-        
-        # NUEVO: Aplicar YTD al componente base y decay intra-mes al total
         ventas_base_ajustada_ytd = ventas_base * ytd_factor
         prediccion_base_ajustada = (ventas_base_ajustada_ytd * 0.4) + (media_ajustada_tendencia * 0.6)
         
-        # Calcular decay_factor para este día
+        # Decay intra-mes
         wom = ((fecha_actual.day - 1) // 7) + 1
         decay_factor = decay_factors.get(wom, 1.0)
         prediccion_base = prediccion_base_ajustada * decay_factor
         
-        # 3e. Ajuste por Eventos (Lógica sin cambios)
-        impacto_evento = 1.0 # Por defecto, no hay impacto
+        # Ajuste por Eventos (misma lógica)
+        impacto_evento = 1.0
         tipo_evento = "Día Normal"
-        
-        fecha_actual_ts = pd.to_datetime(fecha_actual) # Para búsqueda en df_historico
+        fecha_actual_ts = pd.to_datetime(fecha_actual)
         
         if fecha_str in eventos:
-            # Es un evento cargado
             evento_data = eventos[fecha_str]
             tipo_evento = evento_data.get('descripcion', 'Evento')
-            
-            # Si el día ya ha pasado (está en df_historico), calculamos el impacto REAL
             if fecha_actual_ts in df_historico.index:
-                # Usa la venta real del día anterior equivalente (7 días antes)
                 fecha_anterior = fecha_actual - timedelta(days=7)
-                
                 if fecha_anterior in df_historico.index:
                     ventas_anterior = df_historico.loc[fecha_anterior, 'ventas']
-                    ventas_dia = df_historico.loc[fecha_actual_ts, 'ventas'] 
+                    ventas_dia = df_historico.loc[fecha_actual_ts, 'ventas']
                     if ventas_anterior > 0:
                         impacto_evento = ventas_dia / ventas_anterior
                         tipo_evento += " (Impacto Histórico)"
             elif 'impacto_manual_pct' in evento_data:
                 impacto_evento = 1 + (evento_data['impacto_manual_pct'] / 100)
                 tipo_evento += " (Manual)"
-                        
         elif fecha_actual in festivos_es:
             tipo_evento = "Festivo (Auto)"
-            # Impacto = 1.0 (no se aplica ajuste en predicción futura por festivo auto-detectado)
-            
+            # Impacto = 1.0
+        
         prediccion_final = prediccion_base * impacto_evento
         
-        # 3f. Comparar con Real (si existe en el df_historico)
+        # Ventas reales si existen
         ventas_reales_current = None
         if fecha_actual_ts in df_historico.index:
             ventas_reales_current = df_historico.loc[fecha_actual_ts, 'ventas']
 
-        # **FIX: Generar explicación textual para este día, pasando prediccion_base y nuevos factores**
+        # Explicación textual
         explicacion = generar_explicacion_dia(
             dia_semana_num, ventas_base, media_reciente_current, factor_tendencia,
             fecha_actual, BASE_YEAR, CURRENT_YEAR, tipo_evento, prediccion_base,
             ytd_factor, decay_factor
         )
 
-        # Nueva columna: evento del año anterior
+        # Evento del año anterior o posible
         evento_anterior = ""
         if fecha_base_str in eventos:
             evento_anterior = eventos[fecha_base_str].get('descripcion', '')
         else:
             if abs(ventas_base - prediccion_final) >= 1000:
                 evento_anterior = "POSIBLE EVENTO"
-
+        
         predicciones.append({
             'fecha': fecha_actual,
             'dia_semana': DIAS_SEMANA[dia_semana_num],
             'ventas_predichas': prediccion_final, 
             'prediccion_pura': prediccion_base, 
-            'ventas_reales_current_year': ventas_reales_current, # Nombre de columna actualizado
+            'ventas_reales_current_year': ventas_reales_current,
             'base_historica': ventas_base,
-            'media_reciente_current_year': media_reciente_current, # Nombre de columna actualizado
+            'fecha_base_historica': fecha_base_historica,   # <-- NUEVO
+            'ventas_base_historica': ventas_base_historica, # <-- NUEVO
+            'media_reciente_current_year': media_reciente_current,
             'factor_tendencia': factor_tendencia,
             'impacto_evento': impacto_evento,
             'evento': tipo_evento,
-            'explicacion': explicacion,  # Nueva columna para explicación
+            'explicacion': explicacion,
             'ytd_factor': ytd_factor,
             'decay_factor': decay_factor,
             'evento_anterior': evento_anterior,
-            'diferencia_ventas_base': abs(ventas_base - prediccion_final)  # Para styling
+            'diferencia_ventas_base': abs(ventas_base - prediccion_final)
         })
         
     df_prediccion = pd.DataFrame(predicciones).set_index('fecha')
@@ -585,14 +631,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
 def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_tendencia, fecha_actual, base_year, current_year, tipo_evento, prediccion_base, ytd_factor, decay_factor):
     """
     Genera una explicación textual personalizada para cada día de la predicción.
-    Incluye referencias a ventas pasadas, tendencia y razón de la predicción final.
-    FIX: Ahora incluye el valor exacto de prediccion_base para coincidir con la tabla.
-    NUEVO: Incluye menciones a YTD y decay si difieren de 1.0.
     """
     dia_nombre = DIAS_SEMANA[dia_semana_num]
-    mes_actual = fecha_actual.strftime('%B').lower()  # Nombre del mes en minúscula para texto natural
     
-    # Calcular variaciones
     if ventas_base > 0:
         variacion_vs_base = ((media_reciente - ventas_base) / ventas_base) * 100
     else:
@@ -602,8 +643,7 @@ def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_
     direccion_tendencia = "bajada" if tendencia_pct < 0 else "subida"
     abs_tendencia = abs(tendencia_pct)
     
-    # Construir explicación base
-    explicacion = f"En {dia_nombre} del {base_year}, se vendieron aproximadamente €{ventas_base:.0f}. "
+    explicacion = f"En {dia_nombre} del {base_year}, se vendieron €{ventas_base:.0f}. "
     explicacion += f"En el último mes de {current_year}, los {dia_nombre} han promediado €{media_reciente:.0f} "
     
     if variacion_vs_base > 0:
@@ -618,16 +658,13 @@ def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_
     else:
         explicacion += f"Sin tendencia clara en las últimas semanas, "
     
-    # FIX: Usar el valor exacto de prediccion_base (total ponderado)
     explicacion += f"por lo que la predicción base para este {dia_nombre} es de €{prediccion_base:.0f} (ponderada: 40% histórico + 60% reciente ajustado por tendencia). "
     
-    # NUEVO: Mencionar YTD
     if ytd_factor != 1.0:
         ytd_dir = "mejor" if ytd_factor > 1 else "peor"
         ytd_pct = abs((ytd_factor - 1) * 100)
         explicacion += f"Ajustado por rendimiento YTD ({ytd_dir} del {ytd_pct:.1f}%). "
     
-    # NUEVO: Mencionar decay
     if decay_factor != 1.0:
         decay_dir = "bajada" if decay_factor < 1 else "subida"
         decay_pct = abs((decay_factor - 1) * 100)
@@ -644,7 +681,8 @@ def optimizar_coste_personal(df_prediccion):
     """
     Resuelve el problema de optimización de horas de personal usando PuLP.
     Maximiza horas totales sujeto a restricciones dinámicas de coste diario (min/max) y semanal (max).
-    Si infeasible, usa heurística para estimación.
+    Luego añade +6 horas fijas a repartidores el viernes y recalcula métricas.
+    CAMBIO: Redondeo hacia arriba a múltiplos de 0,25 y recalcular % de costes.
     """
     dias = list(range(7)) # 0 a 6
     ventas_estimadas = df_prediccion['ventas_predichas'].values
@@ -656,55 +694,36 @@ def optimizar_coste_personal(df_prediccion):
     horas_aux = pulp.LpVariable.dicts("Horas_Aux", dias, lowBound=0, cat='Continuous')
     horas_rep = pulp.LpVariable.dicts("Horas_Rep", dias, lowBound=0, cat='Continuous')
     
-    # 3. Definir Función Objetivo (Maximizar horas totales para acercarse a límites reales)
+    # 3. Función Objetivo
     prob += pulp.lpSum([horas_aux[i] + horas_rep[i] for i in dias]), "Horas_Totales"
     
-    # 4. Definir Restricciones
-    
-    # Restricciones Diarias
+    # 4. Restricciones
     for i in dias:
         ventas_dia = ventas_estimadas[i]
-        
-        # Obtener límites dinámicos
         total_min_pct, total_max_pct, aux_min_pct, aux_max_pct, rep_min_pct, rep_max_pct = get_daily_limits(ventas_dia, i)
         
-        # Costes
         coste_total_dia = (horas_aux[i] + horas_rep[i]) * COSTO_HORA_PERSONAL
         coste_aux_dia = horas_aux[i] * COSTO_HORA_PERSONAL
         coste_rep_dia = horas_rep[i] * COSTO_HORA_PERSONAL
 
-        # R1: Coste Total Máximo Diario
-        coste_total_maximo = total_max_pct * ventas_dia
-        prob += coste_total_dia <= coste_total_maximo, f"Coste_Total_Max_Dia_{i}"
-        
-        # R2: Coste Total Mínimo Diario
-        coste_total_minimo = total_min_pct * ventas_dia
-        if ventas_dia > 0:
-            prob += coste_total_dia >= coste_total_minimo, f"Coste_Total_Min_Dia_{i}"
+        # Máximos
+        prob += coste_total_dia <= total_max_pct * ventas_dia, f"Coste_Total_Max_Dia_{i}"
+        prob += coste_aux_dia <= aux_max_pct * ventas_dia, f"Coste_Aux_Max_Dia_{i}"
+        prob += coste_rep_dia <= rep_max_pct * ventas_dia, f"Coste_Rep_Max_Dia_{i}"
 
-        # R3: Coste Auxiliares Máximo y Mínimo Diario
-        coste_aux_maximo = aux_max_pct * ventas_dia
-        prob += coste_aux_dia <= coste_aux_maximo, f"Coste_Aux_Max_Dia_{i}"
-        coste_aux_minimo = aux_min_pct * ventas_dia
+        # Mínimos
         if ventas_dia > 0:
-            prob += coste_aux_dia >= coste_aux_minimo, f"Coste_Aux_Min_Dia_{i}"
-
-        # R4: Coste Repartidores Máximo y Mínimo Diario
-        coste_rep_maximo = rep_max_pct * ventas_dia
-        prob += coste_rep_dia <= coste_rep_maximo, f"Coste_Rep_Max_Dia_{i}"
-        coste_rep_minimo = rep_min_pct * ventas_dia
-        if ventas_dia > 0:
-            prob += coste_rep_dia >= coste_rep_minimo, f"Coste_Rep_Min_Dia_{i}"
+            prob += coste_total_dia >= total_min_pct * ventas_dia, f"Coste_Total_Min_Dia_{i}"
+            prob += coste_aux_dia >= aux_min_pct * ventas_dia, f"Coste_Aux_Min_Dia_{i}"
+            prob += coste_rep_dia >= rep_min_pct * ventas_dia, f"Coste_Rep_Min_Dia_{i}"
 
     # Restricción Semanal Global (Máximo)
     coste_total_semanal = pulp.lpSum([(horas_aux[i] + horas_rep[i]) * COSTO_HORA_PERSONAL for i in dias])
     ventas_total_semanal = pulp.lpSum(ventas_estimadas)
-    
     prob += coste_total_semanal <= LIMITE_COSTE_SEMANAL_GLOBAL * ventas_total_semanal, "Coste_Global_Semanal_Max"
 
     # 5. Resolver
     try:
-        # Aumentamos el tiempo límite y el número de threads para PuLP/CBC
         prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=60)) 
     except Exception as e:
         st.error(f"Error al ejecutar el optimizador PuLP: {e}")
@@ -712,26 +731,35 @@ def optimizar_coste_personal(df_prediccion):
 
     status = pulp.LpStatus[prob.status]
     
-    if status == 'Optimal':
-        # Extraer resultados
+    def redondear_025(x):
+        """CAMBIO: Redondea hacia arriba a múltiplos de 0.25."""
+        if x is None:
+            return 0.0
+        return math.ceil(float(x) * 4) / 4
+
+    def construir_resultados(horas_aux_vals, horas_rep_vals):
         resultados = []
         for i in dias:
             ventas = ventas_estimadas[i]
-            h_aux = horas_aux[i].varValue
-            h_rep = horas_rep[i].varValue
-            
-            # Asegurar que los valores nulos (cercanos a cero no asignados) se muestren como 0.0
-            h_aux = max(0.0, h_aux if h_aux is not None else 0.0)
-            h_rep = max(0.0, h_rep if h_rep is not None else 0.0)
+            h_aux = max(0.0, horas_aux_vals[i] if horas_aux_vals[i] is not None else 0.0)
+            h_rep = max(0.0, horas_rep_vals[i] if horas_rep_vals[i] is not None else 0.0) 
+
+            # EXTRA: +6 horas fijas viernes
+            extra_viernes = ""
+            if i == 4:
+                h_rep += 6.0
+
+            # CAMBIO: redondear a 0.25 hacia arriba
+            h_aux = redondear_025(h_aux)
+            h_rep = redondear_025(h_rep)
 
             h_total = h_aux + h_rep
             coste_total = h_total * COSTO_HORA_PERSONAL
-            
-            # Cálculo de porcentajes
-            pct_coste_total = (coste_total / ventas) if ventas > 0 else 0
-            pct_coste_aux = (h_aux * COSTO_HORA_PERSONAL / ventas) if ventas > 0 else 0
-            pct_coste_rep = (h_rep * COSTO_HORA_PERSONAL / ventas) if ventas > 0 else 0
-            
+
+            pct_coste_total = (coste_total / ventas) * 100 if ventas > 0 else 0
+            pct_coste_aux = (h_aux * COSTO_HORA_PERSONAL / ventas) * 100 if ventas > 0 else 0
+            pct_coste_rep = (h_rep * COSTO_HORA_PERSONAL / ventas) * 100 if ventas > 0 else 0
+
             resultados.append({
                 'Día': DIAS_SEMANA[i],
                 'Ventas Estimadas': ventas,
@@ -739,15 +767,20 @@ def optimizar_coste_personal(df_prediccion):
                 'Horas Repartidores': h_rep,
                 'Horas Totales Día': h_total,
                 'Coste Total Día': coste_total,
-                '% Coste Total s/ Ventas': pct_coste_total * 100,
-                '% Coste Auxiliares s/ Ventas': pct_coste_aux * 100,
-                '% Coste Repartidores s/ Ventas': pct_coste_rep * 100
+                '% Coste Total s/ Ventas': pct_coste_total,
+                '% Coste Auxiliares s/ Ventas': pct_coste_aux,
+                '% Coste Repartidores s/ Ventas': pct_coste_rep,
+                'Extra viernes': extra_viernes  # NUEVO
             })
-        
-        df_resultados = pd.DataFrame(resultados)
+        return pd.DataFrame(resultados)
+
+    if status == 'Optimal':
+        horas_aux_vals = [horas_aux[i].varValue for i in dias]
+        horas_rep_vals = [horas_rep[i].varValue for i in dias]
+        df_resultados = construir_resultados(horas_aux_vals, horas_rep_vals)
         return df_resultados, status
     else:
-        # Fallback heurístico: Calcular estimación basada en promedios de límites
+        # Fallback heurístico: igual al original + suma de 6 horas viernes
         resultados_data = []
         total_coste_heuristic = 0.0
         ventas_total = sum(ventas_estimadas)
@@ -757,38 +790,30 @@ def optimizar_coste_personal(df_prediccion):
             dia_semana_num = i
             total_min_pct, total_max_pct, aux_min_pct, aux_max_pct, rep_min_pct, rep_max_pct = get_daily_limits(ventas, dia_semana_num)
             
-            # Target total %: promedio de min y max
             target_total_pct = (total_min_pct + total_max_pct) / 2
             target_total_cost = target_total_pct * ventas
             
-            # Target aux: usar max (óptimo para altas ventas)
             target_aux_cost = aux_max_pct * ventas
             target_rep_cost = target_total_cost - target_aux_cost
             
-            # Clamp rep a max
             if target_rep_cost > rep_max_pct * ventas:
                 target_rep_cost = rep_max_pct * ventas
                 target_aux_cost = min(target_total_cost - target_rep_cost, aux_max_pct * ventas)
             
-            # Clamp a mins
             target_aux_cost = max(target_aux_cost, aux_min_pct * ventas)
             target_rep_cost = max(target_rep_cost, rep_min_pct * ventas)
             target_total_cost = target_aux_cost + target_rep_cost
             
-            # Acumular para chequeo semanal
             total_coste_heuristic += target_total_cost
             
-            # Temp dict con costes
-            temp_dict = {
+            resultados_data.append({
                 'Día': DIAS_SEMANA[i],
                 'Ventas Estimadas': ventas,
                 'coste_aux': target_aux_cost,
                 'coste_rep': target_rep_cost,
                 'coste_total': target_total_cost
-            }
-            resultados_data.append(temp_dict)
+            })
         
-        # Chequeo y escalado semanal si excede
         limite_semanal = LIMITE_COSTE_SEMANAL_GLOBAL * ventas_total
         if total_coste_heuristic > limite_semanal:
             scale = limite_semanal / total_coste_heuristic
@@ -797,21 +822,30 @@ def optimizar_coste_personal(df_prediccion):
                 temp_dict['coste_rep'] *= scale
                 temp_dict['coste_total'] *= scale
         
-        # Ahora calcular horas y % finales
         resultados = []
         for temp_dict in resultados_data:
             ventas = temp_dict['Ventas Estimadas']
             coste_aux = temp_dict['coste_aux']
             coste_rep = temp_dict['coste_rep']
-            coste_total = temp_dict['coste_total']
             
             h_aux = coste_aux / COSTO_HORA_PERSONAL
             h_rep = coste_rep / COSTO_HORA_PERSONAL
+
+            # EXTRA: +6 horas fijas viernes
+            extra_viernes = ""
+            if temp_dict['Día'] == 'Viernes':
+                h_rep += 6.0
+
+            # CAMBIO: redondear a 0.25 hacia arriba
+            h_aux = redondear_025(h_aux)
+            h_rep = redondear_025(h_rep)
+
             h_total = h_aux + h_rep
+            coste_total = h_total * COSTO_HORA_PERSONAL
             
-            pct_coste_total = (coste_total / ventas) if ventas > 0 else 0
-            pct_coste_aux = (coste_aux / ventas) if ventas > 0 else 0
-            pct_coste_rep = (coste_rep / ventas) if ventas > 0 else 0
+            pct_coste_total = (coste_total / ventas) * 100 if ventas > 0 else 0
+            pct_coste_aux = (h_aux * COSTO_HORA_PERSONAL / ventas) * 100 if ventas > 0 else 0
+            pct_coste_rep = (h_rep * COSTO_HORA_PERSONAL / ventas) * 100 if ventas > 0 else 0
             
             resultados.append({
                 'Día': temp_dict['Día'],
@@ -820,29 +854,25 @@ def optimizar_coste_personal(df_prediccion):
                 'Horas Repartidores': h_rep,
                 'Horas Totales Día': h_total,
                 'Coste Total Día': coste_total,
-                '% Coste Total s/ Ventas': pct_coste_total * 100,
-                '% Coste Auxiliares s/ Ventas': pct_coste_aux * 100,
-                '% Coste Repartidores s/ Ventas': pct_coste_rep * 100
+                '% Coste Total s/ Ventas': pct_coste_total,
+                '% Coste Auxiliares s/ Ventas': pct_coste_aux,
+                '% Coste Repartidores s/ Ventas': pct_coste_rep,
+                'Extra viernes': extra_viernes  # NUEVO
             })
         
         df_resultados = pd.DataFrame(resultados)
         return df_resultados, "Heuristic"
 
-# --- Funciones de Visualización (Sin Cambios significativos, solo nombres de columnas) ---
+# --- Funciones de Visualización (conservadas) ---
 
 def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_range, base_year_label, fecha_ini_current, is_mobile=False):
     """
     Genera un gráfico de líneas comparativo (Año Base, Año Actual Real, Predicción)
     para el rango de fechas seleccionado (4 semanas históricas + 1 semana predicha).
-    
-    :param base_year_label: El año real de origen de los datos de base histórica.
-    :param fecha_ini_current: La fecha de inicio del rango histórico (lunes 4 semanas antes).
-    :param is_mobile: Si True, limita la visualización solo a la semana de predicción (7 días).
     """
-    
     fig = make_subplots(specs=[[{"secondary_y": False}]])
     
-    # NUEVO: Si es móvil, filtrar datos solo a la semana de predicción
+    # Modo compacto móvil
     if is_mobile and not df_pred_sem.empty:
         week_start = df_pred_sem.index.min()
         week_end = df_pred_sem.index.max()
@@ -868,15 +898,13 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             x_min = df_pred_sem.index.min() if not df_pred_sem.empty else datetime.today()
             x_max = df_pred_sem.index.max() if not df_pred_sem.empty else datetime.today() + timedelta(days=7)
     
-    # 1. Datos Año Base (Azul) - Ya tiene el índice ajustado al Año Actual
+    # Año Base
     base_year_display = base_year_label if not df_hist_base_equiv_mobile.empty else 'Base'
-    
     if not df_hist_base_equiv_mobile.empty:
         fig.add_trace(
             go.Scatter(
                 x=df_hist_base_equiv_mobile.index, 
                 y=df_hist_base_equiv_mobile['ventas'], 
-                # FIX APLICADO: Usar el año real de la base para la etiqueta
                 name=f'Ventas Año Base ({base_year_display} Equivalente Alineado)',
                 mode='lines+markers',
                 line=dict(color='royalblue', width=2)
@@ -884,10 +912,9 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             secondary_y=False
         )
 
-    # 2. Datos Reales Año Actual (Verde) - Rango histórico completo o filtrado
+    # Reales año actual
     current_year = df_hist_current_range_mobile.index.year.min() if not df_hist_current_range_mobile.empty else 'Actual'
     if not df_hist_current_range_mobile.empty:
-        # Trazar la línea de Ventas Reales (cubre las 4 semanas históricas + días reales de la semana de predicción)
         fig.add_trace(
             go.Scatter(
                 x=df_hist_current_range_mobile.index, 
@@ -899,56 +926,26 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             secondary_y=False
         )
     
-    
+    # Predicción pura histórica y final
     if not df_pred_sem.empty: 
-        
-        # 3. Predicción Pura (Naranja Punteado) - Solo si no es móvil o limitada
         if not is_mobile:
-            # Recalcular la predicción pura para el rango histórico de 4 semanas ANTES de la seleccionada.
-            
-            # Generar rango completo histórico de 4 semanas (28 días)
-            start_hist = fecha_ini_current
-            end_hist = start_hist + timedelta(weeks=4) - timedelta(days=1)
-            historico_full_range = pd.date_range(start=start_hist, end=end_hist, freq='D')
-            
-            predicciones_historicas_puras = []
-            # **FIX: Calcular por semanas alineadas (4 lunes históricos)**
-            # Asumiendo fecha_ini_current es lunes
+            # Predicciones puras para 4 semanas históricas previas
             for j in range(4):
                 monday_hist = fecha_ini_current + timedelta(weeks=j)
-                df_temp = calcular_prediccion_semana(monday_hist.date()) 
-                
+                df_temp = calcular_prediccion_semana(monday_hist.date())
                 if not df_temp.empty:
-                    for idx, row in df_temp.iterrows():
-                        idx_pd = pd.to_datetime(idx)
-                        # Añadir sin condición de ventas reales, para cubrir todos los días del rango histórico
-                        try:
-                            predicciones_historicas_puras.append({
-                                'fecha': idx_pd,
-                                'prediccion_pura': row['prediccion_pura']
-                            })
-                        except KeyError:
-                            continue
-            
-            # Unimos las predicciones puras históricas con las de la semana seleccionada
-            df_pura_historica = pd.DataFrame(predicciones_historicas_puras).set_index('fecha')
-            
-            # Combinar
-            df_pura_plot = pd.concat([df_pura_historica[['prediccion_pura']], df_pred_sem[['prediccion_pura']]]).sort_index()
-            df_pura_plot = df_pura_plot[~df_pura_plot.index.duplicated(keep='first')]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df_temp.index, 
+                            y=df_temp['prediccion_pura'], 
+                            name='Predicción Pura (Sin Ajuste)',
+                            mode='lines',
+                            line=dict(color='orange', width=1.5, dash='dash'),
+                            showlegend=(j == 0)
+                        ),
+                        secondary_y=False
+                    )
 
-            fig.add_trace(
-                go.Scatter(
-                    x=df_pura_plot.index, 
-                    y=df_pura_plot['prediccion_pura'], 
-                    name='Predicción Pura (Sin Ajuste)',
-                    mode='lines',
-                    line=dict(color='orange', width=1.5, dash='dash')
-                ),
-                secondary_y=False
-            )
-
-        # 4. Predicción Final (Rojo Punteado) - Solo la semana seleccionada (Futuro/Ajustado)
         fig.add_trace(
             go.Scatter(
                 x=df_pred_sem.index, 
@@ -960,10 +957,9 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             secondary_y=False
         )
         
-        # 5. Marcadores de Eventos (Solo para la semana de predicción)
+        # Marcadores de eventos/festivos
         event_col = df_pred_sem['evento'] if 'evento' in df_pred_sem.columns else pd.Series(['Día Normal'] * len(df_pred_sem), index=df_pred_sem.index)
         eventos_en_rango = df_pred_sem[event_col.str.contains("Evento") | event_col.str.contains("Festivo")]
-        
         if not eventos_en_rango.empty:
             fig.add_trace(
                 go.Scatter(
@@ -981,7 +977,7 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
                 secondary_y=False
             )
     
-    # 6. Configuración del Eje X para cubrir todo el rango de visualización
+    # Eje X
     if not all_dates.empty:
         tickvals = [pd.to_datetime(d) for d in all_dates]
         ticktext = [f"{d.day} {DIAS_SEMANA[d.weekday()][:3]}" for d in all_dates]
@@ -994,13 +990,12 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
         xaxis_title='Fecha',
         yaxis_title='Ventas (€)',
         hovermode="x unified",
-        xaxis_range=[x_min, x_max],  # Asegura que el eje X cubra las 5 semanas o solo la semana
+        xaxis_range=[x_min, x_max],
         xaxis=dict(
             tickvals=tickvals,
             ticktext=ticktext,
             tickangle=-45
         ),
-        # NUEVO: Leyenda horizontal encima de la gráfica
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1009,7 +1004,6 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
             x=0.5
         )
     )
-    
     return fig
 
 def generar_grafico_barras_dias(df_pred, df_hist_base_equiv):
@@ -1032,104 +1026,68 @@ def generar_grafico_barras_dias(df_pred, df_hist_base_equiv):
     if df_hist_base_equiv.empty:
         df_base_agg = pd.DataFrame(columns=['dia_semana', 'ventas', 'Tipo', 'etiqueta_eje_x'])
     else:
-        # ** FIX ERROR CLAVE (Reindexación): Se usa .values para asignar un array simple y evitar el reindex por etiquetas **
         original_days = df_hist_base_equiv.index.day_name().to_series()
         mapped_days = original_days.map(day_mapping_en_es)
-        
-        # 1. Combina el nombre en español (si existe) o el original (en inglés)
         day_names_series = mapped_days.fillna(original_days)
-        
-        # 2. Asigna el resultado como un array para evitar el error de reindexación
         df_hist_base_equiv['dia_semana'] = day_names_series.values
         
-        # Promedio del día de la semana en el rango histórico del Año Base (Equivalente)
         df_base_agg = df_hist_base_equiv.groupby('dia_semana')['ventas'].mean().reset_index()
         df_base_agg['Tipo'] = base_year_label
-        
-        # ** FIX EJE X: Solo el nombre del día para el Año Base **
         df_base_agg['etiqueta_eje_x'] = df_base_agg['dia_semana']
-
 
     # --- Preparar DataFrame de la Predicción ---
     df_pred_agg = df_pred[['dia_semana', 'ventas_predichas']]
     df_pred_agg.columns = ['dia_semana', 'ventas']
     df_pred_agg['Tipo'] = current_year_label
-    
-    # ** FIX EJE X: Día + Número del día para la Predicción **
-    df_pred_agg['dia_mes'] = df_pred.index.day # Extraer el número del día
+    df_pred_agg['dia_mes'] = df_pred.index.day
     df_pred_agg['etiqueta_eje_x'] = df_pred_agg['dia_semana'] + ' ' + df_pred_agg['dia_mes'].astype(str)
     
     # --- Combinar y Ordenar ---
     df_plot = pd.concat([df_base_agg, df_pred_agg])
-    
-    # La columna de orden sigue siendo solo el día, para asegurar la agrupación.
     df_plot['dia_semana_orden'] = pd.Categorical(df_plot['dia_semana'], categories=DIAS_SEMANA, ordered=True)
     df_plot = df_plot.sort_values('dia_semana_orden')
 
     # --- Configuración Visual ---
-    
-    # 1. Definir colores personalizados
     color_map = {
         base_year_label: '#ADD8E6', # Light Blue
         current_year_label: '#98FB98' # Pale Green
     }
-    
-    # 2. Preparar el texto de la etiqueta (euros sin comillas de decimales)
-    # ** FIX TEXTO SUPERIOR: SOLO el monto en Euros **
     df_plot['texto_barra'] = '€' + df_plot['ventas'].round(0).astype(int).astype(str)
     
-    # 3. GENERAR GRÁFICO: Usamos 'dia_semana_orden' para la posición y 'texto_barra' para el monto superior
     fig = px.bar(
         df_plot, 
-        x='dia_semana_orden', # Columna para agrupar y ordenar
+        x='dia_semana_orden', 
         y='ventas', 
         color='Tipo', 
-        barmode='group', # Agrupar las barras una al lado de la otra
+        barmode='group',
         title=f'Comparativa de Ventas por Día de la Semana ({base_year_label} vs {current_year_label})',
-        color_discrete_map=color_map, # Aplicar los colores personalizados
-        text='texto_barra', # ** FIX: Usar SOLO el monto para la etiqueta superior **
+        color_discrete_map=color_map,
+        text='texto_barra',
         custom_data=['etiqueta_eje_x'] 
     )
-    
-    # 4. Ajustar el texto de posición, hover y etiquetas
     fig.update_traces(
         textposition='outside',
-        # Ajustamos el hover para que muestre la etiqueta completa
         hovertemplate='<b>%{customdata[0]}</b><br>Ventas: %{y:,.2f}€<extra></extra>'
     )
     
-    # 5. Asegurar que el nombre del eje X es legible.
-    # Creamos un mapeo para que la etiqueta 'Lunes' del eje X se convierta en 'Lunes 17' si es la barra de Predicción.
     tick_map = df_plot.set_index(['dia_semana_orden', 'Tipo'])['etiqueta_eje_x'].to_dict()
-    
-    # Para el eje X, solo podemos poner una etiqueta por categoría (Lunes, Martes...).
-    # Para que se muestre la etiqueta "Lunes 17", debemos forzar esa etiqueta en la posición 'Lunes'.
-    # Como la barra de Año Base (Promedio) y la de Predicción comparten la categoría 'Lunes', 
-    # forzaremos que la etiqueta siempre muestre la más detallada (la de Predicción).
-    
     forced_tick_text = []
     for dia in DIAS_SEMANA:
-        # Buscamos la etiqueta más detallada (Predicción) o usamos la base si no hay Predicción.
         pred_label = tick_map.get((dia, current_year_label))
         base_label = tick_map.get((dia, base_year_label))
-        
-        # Priorizamos la etiqueta con el día y el número (Predicción)
         label_to_use = pred_label if pred_label else base_label
         forced_tick_text.append(label_to_use if label_to_use else dia)
-
 
     fig.update_layout(
         xaxis_title="Día de la Semana y del Mes",
         xaxis={'categoryorder':'array', 
                'categoryarray':DIAS_SEMANA,
-               # Mapeamos los ticks (Lunes, Martes...) a las etiquetas forzadas (Lunes 17, Martes 18...)
                'tickvals': DIAS_SEMANA,
                'ticktext': forced_tick_text
               },
         xaxis_tickangle=-45,
         uniformtext_minsize=10, 
         uniformtext_mode='hide',
-        # NUEVO: Leyenda horizontal encima de la gráfica
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1148,15 +1106,12 @@ def to_excel(df_pred, df_opt):
         # Formatear predicción antes de guardar
         df_pred_export = df_pred.copy()
         df_pred_export.index = df_pred_export.index.strftime('%Y-%m-%d')
-        # Eliminar columnas internas para exportación (nombres actualizados)
         cols_to_drop = ['base_historica', 'media_reciente_current_year', 'factor_tendencia', 'explicacion', 'ytd_factor', 'decay_factor']
         df_pred_export.drop(columns=[col for col in cols_to_drop if col in df_pred_export.columns], inplace=True)
-        # Reemplazar valores nulos con una cadena vacía antes de guardar
         df_pred_export = df_pred_export.fillna('-')
         df_pred_export.to_excel(writer, sheet_name='Prediccion_Ventas')
         
         # Formatear optimización antes de guardar
-        # Incluir los porcentajes de coste calculados
         df_opt_export = df_opt.copy()
         df_opt_export = df_opt_export.rename(columns={
             '% Coste Total s/ Ventas': 'Pct Coste Total',
@@ -1185,17 +1140,15 @@ st.sidebar.markdown("Herramienta para predecir ventas y optimizar costes de pers
 st.sidebar.header("1. Cargar Datos Históricos de Ventas")
 st.sidebar.markdown("Sube tus archivos CSV o Excel (columnas: 'fecha', 'ventas') para *todos* los años. Los datos se fusionarán en un histórico único.")
 
-# **CAMBIO: Uploader unificado**
 uploader_historico = st.sidebar.file_uploader("Archivo de Ventas Históricas (Todos los Años)", type=['csv', 'xlsx'], key="up_historico")
 if uploader_historico:
     df_nuevo = procesar_archivo_subido(uploader_historico)
     if df_nuevo is not None:
-        # Fusionar con datos existentes
         st.session_state.df_historico = pd.concat([st.session_state.df_historico, df_nuevo])
         st.session_state.df_historico = st.session_state.df_historico[
             ~st.session_state.df_historico.index.duplicated(keep='last')
         ].sort_index()
-        guardar_datos('ventas') # Guardar en el nuevo archivo único
+        guardar_datos('ventas')
         st.sidebar.success("Datos históricos cargados y guardados.")
 
 # --- INICIO DE LA NUEVA FUNCIONALIDAD ---
@@ -1209,25 +1162,19 @@ with st.sidebar.form("form_venta_manual"):
     if submitted_manual:
         fecha_pd = pd.to_datetime(fecha_manual)
         
-        # Acceder al dataframe (asegurándose que existe)
         df_hist = st.session_state.get('df_historico', pd.DataFrame(columns=['ventas']))
         if not isinstance(df_hist, pd.DataFrame):
              df_hist = pd.DataFrame(columns=['ventas'])
              
         df_hist.index.name = 'fecha'
-
-        # Añadir o actualizar la fila
         df_hist.loc[fecha_pd] = {'ventas': ventas_manual}
         
-        # Re-ordenar y guardar en session_state
         st.session_state.df_historico = df_hist.sort_index()
-        
         guardar_datos('ventas')
         
         st.sidebar.success(f"Venta de €{ventas_manual:.2f} guardada/actualizada para {fecha_manual.strftime('%Y-%m-%d')}.")
         st.rerun()
 # --- FIN DE LA NUEVA FUNCIONALIDAD ---
-
 
 # Editor de Datos en Expander
 with st.sidebar.expander("Ver / Editar Datos Históricos (Guardado automático)"):
@@ -1241,7 +1188,7 @@ with st.sidebar.expander("Ver / Editar Datos Históricos (Guardado automático)"
     )
     if edited_df_historico is not None:
         st.session_state.df_historico = edited_df_historico
-        guardar_datos('ventas') # Guardar en el nuevo archivo único
+        guardar_datos('ventas')
 
 # --- Gestión de Eventos Anómalos (Sidebar) ---
 st.sidebar.header("2. Calendario de Eventos Anómalos")
@@ -1256,7 +1203,7 @@ uploader_eventos = st.sidebar.file_uploader(
 if uploader_eventos:
     nuevos_eventos = procesar_archivo_eventos(uploader_eventos)
     if nuevos_eventos:
-        st.session_state.eventos.update(nuevos_eventos) # Fusiona/sobrescribe
+        st.session_state.eventos.update(nuevos_eventos)
         guardar_datos('eventos')
         st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_eventos)} eventos.")
         st.rerun()
@@ -1372,13 +1319,13 @@ if st.session_state.get("show_delete_modal", False):
 
 st.title("📊 Panel de Predicción y Optimización de Personal")
 
-# NUEVO: Checkbox para vista compacta (móvil) en sidebar para facilitar el uso en móvil
+# NUEVO: Checkbox para vista compacta (móvil) en sidebar
 with st.sidebar:
     vista_compacta = st.checkbox("👉 Vista Compacta (solo 7 días en gráfica de líneas - recomendado para móvil)", value=False, help="Activa para ver solo la semana de predicción en la gráfica de líneas, ideal para pantallas pequeñas.")
 
 # --- Sección de Predicción y Optimización ---
 st.header("Selección y Cálculo Semanal")
-st.markdown("Selecciona el **Lunes** de la semana que deseas predecir. La predicción se basará en los datos del año inmediatamente anterior como histórico base, alineado por semanas equivalentes en el calendario.")
+st.markdown("Selecciona el **Lunes** de la semana que deseas predecir. La predicción se basará en los datos del año inmediatamente anterior como histórico base, aplicando comparaciones específicas para festivos y vísperas.")
 
 # Determinamos si el cálculo está disponible
 calculo_disponible = datos_listos_para_prediccion()
@@ -1393,7 +1340,8 @@ fecha_inicio_seleccionada = st.date_input(
     "Selecciona el Lunes de inicio de la semana:",
     value=proximo_lunes,
     min_value=datetime(2024, 1, 1).date(),
-    max_value=datetime(2028, 12, 31).date() # Aumentamos el rango de predicción
+    max_value=datetime(2028, 12, 31).date()
+
 )
 
 if fecha_inicio_seleccionada.weekday() != 0:
@@ -1426,7 +1374,6 @@ if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabl
         st.error("Ocurrió un error al generar la predicción. Revisa si tienes datos históricos suficientes.")
     else:
         st.session_state.df_prediccion = df_prediccion 
-        # ** FIX PERSISTENCIA: Guardar la fecha usada para el cálculo **
         st.session_state.last_calculated_date = fecha_inicio_seleccionada
         st.rerun() 
 
@@ -1434,13 +1381,45 @@ if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabl
 if not calculo_disponible:
     st.error("El botón de cálculo está desactivado. Por favor, sube datos históricos en la barra lateral.")
 
-# ** FIX PERSISTENCIA: Comprobar si el gráfico está 'Stale' **
+# ** FIX PERSISTENCIA: Comprobar si el gráfico está 'Stale' **  
 display_results = False
 if 'df_prediccion' in st.session_state and 'last_calculated_date' in st.session_state and st.session_state.last_calculated_date is not None:
     if st.session_state.last_calculated_date == fecha_inicio_seleccionada:
         display_results = True
     else:
         st.warning("La fecha seleccionada ha cambiado. Pulsa 'Calcular' para generar la nueva predicción de forma correcta.")
+
+def color_porcentajes(series):
+    # CAMBIO: estilo positivo/negativo en porcentajes (verde/rojo claro) incluso si son texto
+    def get_style(val):
+        try:
+            # Si viene en texto tipo "12.34%" o " - "
+            if isinstance(val, str):
+                if val.strip() == '' or val.strip() == '-' or val.strip() == ' - ':
+                    return ''
+                # extraer número
+                num_str = val.replace('%', '').replace(',', '.').strip()
+                num = float(num_str)
+            else:
+                num = float(val)
+        except:
+            return ''
+    return [get_style(x) for x in series]
+    
+def color_factor_series(series):
+    # CAMBIO: para columnas de factores (1.00 neutral, >1 verde, <1 rojo)
+    def get_style(val):
+        try:
+            num = float(val)
+        except:
+            return ''
+        if num > 1.0:
+            return 'color: #ccffcc'  # Verde clarito
+        elif num < 1.0:
+            return 'color: #ffcccc'  # Rojo clarito
+        else:
+            return ''
+    return [get_style(x) for x in series]
 
 # Mostrar resultados si están disponibles y no están 'stale'
 if display_results:
@@ -1451,12 +1430,8 @@ if display_results:
     # --- Mostrar Tabla de Predicción ---
     st.subheader("1. Predicción de Ventas Semanal")
     
-    df_prediccion_display = df_prediccion.reset_index()  # FIX: reset_index() para incluir 'fecha' como columna, sin drop=True
-    
-    # Modificar dia_semana para incluir el número del día
+    df_prediccion_display = df_prediccion.reset_index()
     df_prediccion_display['dia_semana'] = df_prediccion_display['dia_semana'] + ' ' + df_prediccion_display['fecha'].dt.strftime('%d')
-    
-    # Columnas cuyos nombres fueron actualizados
     df_prediccion_display = df_prediccion_display.rename(columns={
         'ventas_reales_current_year': 'Ventas Reales',
         'base_historica': 'Base Histórica (40%)',
@@ -1464,35 +1439,61 @@ if display_results:
     })
     
     PLACEHOLDER_STR = ' - '
-    
     df_prediccion_display['Ventas Reales'] = df_prediccion_display['Ventas Reales'].fillna(PLACEHOLDER_STR)
-    
-    # Verificar si hay Ventas Reales
+
+    # NUEVO: Columna “Buscar partido” con enlace Google por fecha (año anterior)
+    def build_google_query(fecha_base_str):
+        if fecha_base_str is None:
+            return None
+        fecha_base = pd.to_datetime(fecha_base_str)
+        fecha_txt = fecha_base.strftime('%d/%m/%Y')
+        query = f'{fecha_txt} jugó el Futbol Club Barcelona'
+        return "https://www.google.com/search?q=" + urllib.parse.quote(query)
+
+
+    df_prediccion_display['Buscar partido'] = df_prediccion_display['fecha_base_historica'].apply(build_google_query)
+
+
+
+
+    # NUEVO: Flags para festivo y víspera (para styling visual)
+    def flag_festivo(fecha_dt):
+        return fecha_dt in festivos_es or fecha_dt.strftime('%Y-%m-%d') in st.session_state.eventos
+    def flag_vispera(fecha_dt):
+        siguiente = fecha_dt + timedelta(days=1)
+        return flag_festivo(siguiente)
+    df_prediccion_display['es_festivo'] = df_prediccion_display['fecha'].apply(flag_festivo)
+    df_prediccion_display['es_vispera'] = df_prediccion_display['fecha'].apply(flag_vispera)
+
     has_reales = df_prediccion_display['Ventas Reales'].ne(PLACEHOLDER_STR).any()
-    
-    # Reordenar columnas base (sin 'prediccion_pura')
-    base_cols = ['dia_semana', 'evento', 'ventas_predichas', 'Base Histórica (40%)', 'Media Reciente (60%)', 'factor_tendencia', 'impacto_evento', 'ytd_factor', 'decay_factor']
-    
+    base_cols = ['dia_semana', 'evento', 'ventas_predichas', 'Base Histórica (40%)', 'Media Reciente (60%)', 'factor_tendencia', 'impacto_evento', 'ytd_factor', 'decay_factor', 'Buscar partido']
+
     if has_reales:
-        # Añadir Ventas Reales y Diferencia después de ventas_predichas
-        col_order = ['dia_semana', 'evento', 'ventas_predichas', 'Ventas Reales', 'Diferencia_display'] + base_cols[3:-1] + ['evento_anterior']  # Add evento_anterior at end
+        col_order = ['dia_semana', 'evento', 'ventas_predichas', 'Ventas Reales', 'Diferencia_display'] + base_cols[3:]
         reales_numeric = pd.to_numeric(df_prediccion_display['Ventas Reales'], errors='coerce')
         df_prediccion_display['Diferencia'] = reales_numeric - df_prediccion_display['ventas_predichas']
         df_prediccion_display['Diferencia_display'] = df_prediccion_display['Diferencia'].apply(
             lambda x: PLACEHOLDER_STR if pd.isna(x) else f"{x:+.0f}€ {'↑' if x > 0 else '↓'}"
         )
     else:
-        # No incluir Ventas Reales ni Diferencia
-        col_order = base_cols + ['evento_anterior']  # Add evento_anterior at end
+        col_order = base_cols
 
+    # Añadir evento_anterior
+    if 'evento_anterior' in df_prediccion.columns:
+        df_prediccion_display['evento_anterior'] = df_prediccion['evento_anterior'].values
+    else:
+        df_prediccion_display['evento_anterior'] = ""
+    if 'evento_anterior' not in col_order:
+        col_order.append('evento_anterior')
+
+    # Orden final columnas
     df_prediccion_display = df_prediccion_display[[c for c in col_order if c in df_prediccion_display.columns]]
 
-    # Función para colorear la columna de diferencia
+    # Estilos: diferencia, posible evento, festivo y víspera
     def color_diferencia(series):
         def get_color(val):
             if pd.isna(val) or val == PLACEHOLDER_STR:
                 return 'color: black'
-            # Extraer el número de la diferencia (antes de €)
             diff_str = val.split('€')[0]
             diff = pd.to_numeric(diff_str.replace('+', ''), errors='coerce')
             if diff > 0:
@@ -1503,7 +1504,6 @@ if display_results:
                 return 'color: black'
         return [get_color(x) for x in series]
 
-    # Función para colorear evento_anterior si POSIBLE EVENTO
     def color_evento_anterior(series):
         def get_style(val):
             if val == "POSIBLE EVENTO":
@@ -1512,7 +1512,27 @@ if display_results:
                 return ''
         return [get_style(x) for x in series]
 
-    # Aplicar estilos
+    # NUEVO: Estilo fila por festivo y víspera
+    def style_festivo_vispera(df):
+        styles = []
+        for _, row in df.iterrows():
+            if row.get('es_festivo', False):
+                styles.append(['background-color: #d8e7ff'] * len(df.columns))  # Azul claro
+            elif row.get('es_vispera', False):
+                styles.append(['background-color: #eeeeee'] * len(df.columns))  # Gris claro
+            else:
+                styles.append([''] * len(df.columns))
+        return pd.DataFrame(styles, index=df.index, columns=df.columns)
+
+    # Config columna Link
+    column_config = {
+        'Buscar partido': st.column_config.LinkColumn(
+            "Buscar partido",
+            help="Abre Google con la búsqueda: 'DD/MM/YYYY hubo partido del Futbol Club Barcelona o España'",
+            display_text="Buscar"
+        )
+    }
+
     style = df_prediccion_display.style.format({
         'ventas_predichas': "€{:,.2f}",
         'Ventas Reales': lambda x: PLACEHOLDER_STR if x == PLACEHOLDER_STR else f"€{float(x):,.2f}", 
@@ -1522,15 +1542,17 @@ if display_results:
         'impacto_evento': "{:,.2f}",
         'ytd_factor': "{:,.2f}",
         'decay_factor': "{:,.2f}",
-        'Diferencia_display': lambda x: x  # Ya formateado
+        'Diferencia_display': lambda x: x
     })
-    
     if has_reales and 'Diferencia_display' in df_prediccion_display.columns:
         style = style.apply(color_diferencia, subset=['Diferencia_display'], axis=0)
-    
     style = style.apply(color_evento_anterior, subset=['evento_anterior'], axis=0)
+    # CAMBIO: color para columnas de factores (>1 verde, <1 rojo)
+    style = style.apply(color_factor_series, subset=['factor_tendencia','impacto_evento','ytd_factor','decay_factor'], axis=0)
+    # Aplicar estilo por fila festivo/víspera
+    style = style.apply(lambda _: style_festivo_vispera(df_prediccion_display), axis=None)
 
-    st.dataframe(style, width='stretch')
+    st.dataframe(style, width='stretch', column_config=column_config)
     
     with st.expander("Ver detalles del cálculo de predicción"):
         details_text = f"""
@@ -1544,19 +1566,17 @@ if display_results:
         - **Diferencia**: Diferencia entre Ventas Reales y Predicción (con flecha ↑/↓ y color verde/rojo).
         """
         details_text += f"""
-        - **Base Histórica (40%)**: Ventas del día equivalente en la **semana alineada** del año **{BASE_YEAR}** (misma posición en el calendario).
+        - **Base Histórica (40%)**: Si el día es festivo o víspera, se compara con la misma fecha exacta del año **{BASE_YEAR}**. El resto usa la media mensual del día de semana del año **{BASE_YEAR}**, excluyendo festivos y eventos.
         - **Media Reciente (60%)**: Media de las últimas 4 semanas para ese mismo día de la semana en el año **{CURRENT_YEAR}**.
-        - **factor_tendencia**: Factor de ajuste por tendencia lineal en las últimas 8 semanas (1.0 = sin cambio, >1 subida, <1 bajada).
-        - **impacto_evento**: Factor de ajuste.
-        - **ytd_factor**: Factor de ajuste por rendimiento Year-to-Date (acumulado del año vs. año base).
-        - **decay_factor**: Factor de ajuste por posición en el mes (decay intra-mes basado en semanas del mes).
+        - **factor_tendencia**, **impacto_evento**, **ytd_factor**, **decay_factor**: Ajustes aplicados.
+        - **Buscar partido**: Enlace a Google para consultar si hubo partido del FC Barcelona o España ese día.
         - **evento_anterior**: Evento del año anterior si existe; "POSIBLE EVENTO" si diferencia >1000€ (resaltado en rojo claro).
+        - **Marcado visual**: Festivos en azul claro, vísperas en gris claro.
         
         **Explicación Detallada por Día:**
         """
         st.markdown(details_text)
         
-        # **NUEVO: Mostrar explicaciones personalizadas por día**
         for fecha, row in df_prediccion.iterrows():
             st.markdown(f"**{row['dia_semana']} ({fecha.strftime('%d/%m/%Y')}):** {row['explicacion']}")
 
@@ -1568,6 +1588,7 @@ if display_results:
     
     with st.spinner("Optimizando asignación de horas..."):
         df_optimizacion, status = optimizar_coste_personal(df_prediccion)
+
 
     if df_optimizacion is not None:
         if status == "Optimal":
@@ -1591,7 +1612,7 @@ if display_results:
             f"{pct_coste_global:,.2f}%"
         )
 
-        # **NUEVO: Desplegable con detalles de estimación por día**
+        # Detalles límites día
         with st.expander("Detalles de Estimación de Costes por Día"):
             details = []
             for _, row in df_optimizacion.iterrows():
@@ -1610,24 +1631,25 @@ if display_results:
             
             df_details = pd.DataFrame(details)
             st.dataframe(df_details, width='stretch')
-            st.markdown("**Explicación:** Los límites se calculan dinámicamente según el bracket de ventas del día y el día de la semana. El coste asignado respeta estos límites y la restricción semanal global.")
+            st.markdown("**Explicación:** Los límites se calculan dinámicamente según el bracket de ventas del día y el día de la semana. El coste asignado respeta estos límites y la restricción semanal global. Además, los viernes se añaden +6 h fijas a repartidores.")
+
+        # CAMBIO: colores en porcentajes de la tabla de optimización
+        opt_style = df_optimizacion.style.format({
+            'Ventas Estimadas': "€{:,.2f}",
+            'Horas Auxiliares': "{:,.2f} h",
+            'Horas Repartidores': "{:,.2f} h",
+            'Horas Totales Día': "{:,.2f} h",
+            'Coste Total Día': "€{:,.2f}",
+            '% Coste Total s/ Ventas': "{:,.2f}%",
+            '% Coste Auxiliares s/ Ventas': "{:,.2f}%",
+            '% Coste Repartidores s/ Ventas': "{:,.2f}%"
+        })
+        opt_style = opt_style.apply(color_porcentajes, subset=['% Coste Total s/ Ventas','% Coste Auxiliares s/ Ventas','% Coste Repartidores s/ Ventas'], axis=0)
+
+        # Tabla de optimización
+        st.dataframe(opt_style, width='stretch')
         
-        # --- Tabla de Optimización ---
-        st.dataframe(
-            df_optimizacion.style.format({
-                'Ventas Estimadas': "€{:,.2f}",
-                'Horas Auxiliares': "{:,.2f} h",
-                'Horas Repartidores': "{:,.2f} h",
-                'Horas Totales Día': "{:,.2f} h",
-                'Coste Total Día': "€{:,.2f}",
-                '% Coste Total s/ Ventas': "{:,.2f}%",
-                '% Coste Auxiliares s/ Ventas': "{:,.2f}%",
-                '% Coste Repartidores s/ Ventas': "{:,.2f}%"
-            }),
-            width='stretch'
-        )
-        
-        # Botón de exportación
+        # Exportación
         excel_data = to_excel(df_prediccion, df_optimizacion)
         st.download_button(
             label="📥 Exportar a Excel",
@@ -1641,25 +1663,22 @@ if display_results:
     # --- Gráficos (se muestran después de la optimización) ---
     st.subheader("3. Visualización de Datos")
     
-    # **NUEVA LÓGICA: Alinear rangos para base - CAMBIO: Buscar LUNES SIGUIENTE**
     fecha_inicio_dt = datetime.combine(fecha_inicio_seleccionada, datetime.min.time())
-    fecha_ini_current = fecha_inicio_dt - timedelta(weeks=4)  # Lunes 4 semanas antes (alineado)
+    fecha_ini_current = fecha_inicio_dt - timedelta(weeks=4)
     
-    # Para el rango de 5 semanas en base
+    # Base alineada 5 semanas
     fecha_ini_equiv = fecha_ini_current.replace(year=BASE_YEAR)
     dias_hasta_proximo_lunes_ini = (7 - fecha_ini_equiv.weekday()) % 7
     fecha_ini_base = fecha_ini_equiv + timedelta(days=dias_hasta_proximo_lunes_ini)
-    fecha_fin_base = fecha_ini_base + timedelta(weeks=5)  # 5 semanas completas
+    fecha_fin_base = fecha_ini_base + timedelta(weeks=5)
     df_base_graf = st.session_state.df_historico[
         (st.session_state.df_historico.index >= fecha_ini_base) &
         (st.session_state.df_historico.index <= fecha_fin_base)
     ].copy()
-    
-    # Shift index para alinear con current
     delta = fecha_ini_current - fecha_ini_base
     df_base_graf.index = df_base_graf.index + delta
 
-    # Para la semana de predicción en barras (alineada)
+    # Base para semana de barras
     fecha_equiv_inicio = fecha_inicio_dt.replace(year=BASE_YEAR)
     dias_hasta_proximo_lunes = (7 - fecha_equiv_inicio.weekday()) % 7
     fecha_inicio_base_week = fecha_equiv_inicio + timedelta(days=dias_hasta_proximo_lunes)
@@ -1668,42 +1687,34 @@ if display_results:
         (st.session_state.df_historico.index >= fecha_inicio_base_week) &
         (st.session_state.df_historico.index <= fecha_fin_base_week)
     ].copy()
-    
-    # Shift para la semana
     delta_week = fecha_inicio_dt - fecha_inicio_base_week
     df_base_week.index = df_base_week.index + delta_week
 
-    # 1. Datos Históricos Año Actual en el Rango (para línea real)
+    # Año actual histórico
     fecha_fin_graf = fecha_inicio_dt + timedelta(days=6)
     df_current_graf = st.session_state.df_historico[
         (st.session_state.df_historico.index >= fecha_ini_current) &
         (st.session_state.df_historico.index <= fecha_fin_graf)
     ].copy()
 
-    # 3. Datos de la Predicción
+    # Predicción
     df_prediccion = st.session_state.df_prediccion
 
-    # ** FIX ZOOM: Configuración de Plotly para Scroll Zoom **
-    # **NUEVO: Configuración condicional para móvil - Deshabilita modebar y hover unificado para más espacio**
     plotly_config = {
-        'scrollZoom': True, # Activa el zoom con la rueda del ratón
-        'displayModeBar': False,  # Oculta la barra de herramientas en móvil para más espacio (se activa con CSS si es desktop)
+        'scrollZoom': True,
+        'displayModeBar': False,
     }
 
-    # Pasar los DataFrames correctos al generador de gráficos
-    # FIX APLICADO: Pasar el año real de la base (BASE_YEAR) y fecha_ini_current a la función para etiquetar correctamente
-    # NUEVO: Pasar vista_compacta como is_mobile
     fig_lineas = generar_grafico_prediccion(
         df_prediccion, 
         df_base_graf, 
         df_current_graf,
-        base_year_label=BASE_YEAR,  # Nuevo argumento para la etiqueta del año
-        fecha_ini_current=fecha_ini_current,  # Nuevo para cálculo de puras históricas
+        base_year_label=BASE_YEAR,
+        fecha_ini_current=fecha_ini_current,
         is_mobile=vista_compacta
     )
     st.plotly_chart(fig_lineas, use_container_width=True, config=plotly_config) 
     
-    # Gráfico de barras (solo para la semana de predicción, usando df_base_week alineada)
     fig_barras = generar_grafico_barras_dias(df_prediccion, df_base_week)
     st.plotly_chart(fig_barras, use_container_width=True, config=plotly_config) 
 
