@@ -95,7 +95,17 @@ if not st.session_state.autenticado:
     if st.button('Acceder'):
         if password_input and password_input == PASSWORD_SECRET:
             st.session_state.autenticado = True
-            st.experimental_rerun()
+            # Intentamos recargar la app; si la función no existe o falla,
+            # mostramos un mensaje y detenemos la ejecución para evitar errores.
+            try:
+                if hasattr(st, 'experimental_rerun') and callable(st.experimental_rerun):
+                    st.experimental_rerun()
+                else:
+                    st.success('Acceso correcto. Por favor, recarga la página para continuar.')
+                    st.stop()
+            except Exception:
+                st.success('Acceso correcto. Por favor, recarga la página para continuar.')
+                st.stop()
         else:
             st.session_state.login_attempts += 1
             st.error('Contraseña incorrecta. Inténtalo de nuevo.')
