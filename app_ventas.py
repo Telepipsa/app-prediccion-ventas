@@ -55,7 +55,7 @@ if os.path.exists(dev_no_auth_path):
 if not st.session_state.autenticado:
     st.title("🔐 Acceso restringido")
     st.markdown("Introduce la contraseña para acceder a la aplicación.")
-    password_input = st.text_input("Contraseña", type="password")
+    password_input = st.text_input("Contraseña", type="password", key="__pw_input")
 
     # Acceso seguro a secrets: usa get() para evitar KeyError si la clave no existe
     try:
@@ -73,17 +73,38 @@ if not st.session_state.autenticado:
                 with open(secrets_path, 'r', encoding='utf-8') as sf:
                     for line in sf:
                         line_stripped = line.strip()
-                        if line_stripped.startswith('PASSWORD') and '=' in line_stripped:
+                        if line_stripped.upper().startswith('PASSWORD') and '=' in line_stripped:
                             _, rhs = line_stripped.split('=', 1)
-                            rhs = rhs.strip().strip('"').strip("'")
+                            rhs = rhs.strip().strip('\"').strip("'")
                             if rhs:
                                 PASSWORD_SECRET = rhs
                                 break
             except Exception:
                 PASSWORD_SECRET = None
 
+    # Si no hay contraseña configurada, advertimos y bloqueamos el resto de la app
     if PASSWORD_SECRET is None:
-        st.warning("No se ha encontrado la clave 'PASSWORD' en secrets.toml. Comprueba .streamlit/secrets.toml.")
+        st.warning("No se ha encontrado la clave 'PASSWORD' en `st.secrets` ni en `.streamlit/secrets.toml`.")
+        st.info("Para desarrollo local puedes crear un archivo vacío `.streamlit/DEV_NO_AUTH` o configurar `PASSWORD` en `.streamlit/secrets.toml`.")
+        st.stop()
+
+    # Botón para enviar la contraseña y comprobarla. Evitamos continuar si no se autentica.
+    if 'login_attempts' not in st.session_state:
+        st.session_state.login_attempts = 0
+
+    if st.button('Acceder'):
+        if password_input and password_input == PASSWORD_SECRET:
+            st.session_state.autenticado = True
+            st.experimental_rerun()
+        else:
+            st.session_state.login_attempts += 1
+            st.error('Contraseña incorrecta. Inténtalo de nuevo.')
+            if st.session_state.login_attempts >= 5:
+                st.error('Demasiados intentos. Reinicia la app para volver a intentarlo.')
+                st.stop()
+    else:
+        # Si no se ha pulsado Acceder, no continuar con el resto de la aplicación
+        st.stop()
 
 
 # **NUEVO: CSS Personalizado para Responsividad en Móvil**
