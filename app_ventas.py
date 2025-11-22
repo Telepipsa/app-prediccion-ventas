@@ -1558,21 +1558,38 @@ def mostrar_indicador_crecimiento():
             try:
                 cols = st.columns([7, 1])
                 with cols[1]:
-                    # Pasar `delta` como número hace que Streamlit dibuje la flecha/colores correctamente
-                    st.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=round(delta_euros, 0))
-                    # Mostrar debajo una versión con formato de moneda para mayor claridad
-                    st.caption(f"Δ € {delta_euros:,.0f}")
+                    # Render a compact bordered card with percent, colored arrow and € delta.
+                    card_html = f"""
+                    <style>
+                    .ytd-card {{
+                        border: 1px solid rgba(255,255,255,0.06);
+                        background: rgba(255,255,255,0.01);
+                        padding: 8px 10px;
+                        border-radius: 8px;
+                        text-align: right;
+                        box-shadow: 0 6px 18px rgba(2,6,23,0.35);
+                        font-family: inherit;
+                    }}
+                    .ytd-card .label {{ font-size:0.85rem; color:var(--secondaryTextColor,#cfcfcf); }}
+                    .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:4px; }}
+                    .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; }}
+                    </style>
+                    <div class="ytd-card">
+                      <div class="label">Crecimiento YTD</div>
+                      <div class="value">{variacion_pct:.1f}% <span style="color:%s; font-size:1.0rem; margin-left:6px;">%s</span></div>
+                      <div class="delta">€ {delta_euros:,.0f}</div>
+                    </div>
+                    """ % (color, color, flecha)
+                    st.markdown(card_html, unsafe_allow_html=True)
             except Exception:
-                # Si el layout de la página falla, caer a la barra lateral como fallback
+                # Fallback to sidebar simple metric (string delta keeps € sign and arrow semantics)
                 try:
-                    st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=round(delta_euros, 0))
-                    st.sidebar.caption(f"Δ € {delta_euros:,.0f}")
+                    st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=f"€ {delta_euros:,.0f}")
                 except Exception:
                     st.sidebar.write(f"Crecimiento YTD: {variacion_pct:.1f}% (Δ € {delta_euros:,.0f})")
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
-mostrar_indicador_crecimiento() 
 
 # =============================================================================
 # INTERFAZ DE USUARIO (Streamlit)
@@ -1703,6 +1720,11 @@ if st.session_state.get("show_delete_modal", False):
 # =============================================================================
 
 st.title("📊 Panel de Predicción y Optimización de Personal")
+# Mostrar el indicador de crecimiento YTD en la misma fila del título
+try:
+    mostrar_indicador_crecimiento()
+except Exception:
+    pass
 
 with st.sidebar:
     vista_compacta = st.checkbox("👉 Vista Compacta (solo 7 días en gráfica de líneas - recomendado para móvil)", value=False, help="Activa para ver solo la semana de predicción en la gráfica de líneas, ideal para pantallas pequeñas.")
