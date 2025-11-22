@@ -2125,36 +2125,56 @@ if display_results:
                             sty = df_years.style.format({'Ventas': '€{:,.2f}'})
                         st.dataframe(sty, width='stretch')
 
-                    # Mostrar las últimas N ocurrencias del mismo weekday usadas en los cálculos
+                    # Mostrar las últimas N ocurrencias relacionadas con los cálculos
                     try:
                         N = 4
                         target_wd = fecha.weekday()
-                        base_year = fecha.year - 1
-                        df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
-                        # excluir festivos y eventos
-                        festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
-                        eventos_mask = st.session_state.get('eventos', {})
-                        mask_no_f = ~df_base_year.index.isin(festivos_b)
-                        mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
-                        df_clean = df_base_year[mask_no_f & mask_no_e]
-                        occ_same_wd = df_clean[df_clean.index.weekday == target_wd].sort_index()
-                        # Si hay una fecha base exacta, tomar las previas a esa fecha
-                        fecha_base_exacta = None
+
+                        # 1) Últimas N ocurrencias en el AÑO ACTUAL (usadas en 'media reciente')
                         try:
-                            fecha_base_exacta = fecha.replace(year=base_year)
+                            current_year = fecha.year
+                            df_curr_year = st.session_state.df_historico[st.session_state.df_historico.index.year == current_year].copy()
+                            occ_curr = df_curr_year[df_curr_year.index.weekday == target_wd].sort_index()
+                            occ_curr_before = occ_curr[occ_curr.index < fecha]
+                            last_curr = occ_curr_before['ventas'].iloc[-N:]
+                            if not last_curr.empty:
+                                df_last_curr = pd.DataFrame({'fecha': last_curr.index, 'ventas': last_curr.values}).set_index('fecha')
+                                st.markdown(f"**Últimas {len(df_last_curr)} ocurrencias del mismo día de la semana (año {current_year}) — usadas en 'Media Reciente':**")
+                                st.dataframe(df_last_curr.style.format({'ventas': '€{:,.2f}'}), width='stretch')
+                            else:
+                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {current_year} antes de {fecha.strftime('%d/%m/%Y')}).")
                         except Exception:
+                            pass
+
+                        # 2) Últimas N ocurrencias en el AÑO BASE (excluyendo festivos/eventos) — usadas para base histórica
+                        try:
+                            base_year = fecha.year - 1
+                            df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
+                            # excluir festivos y eventos para la comparación histórica
+                            festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+                            eventos_mask = st.session_state.get('eventos', {})
+                            mask_no_f = ~df_base_year.index.isin(festivos_b)
+                            mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
+                            df_clean = df_base_year[mask_no_f & mask_no_e]
+                            occ_base = df_clean[df_clean.index.weekday == target_wd].sort_index()
                             fecha_base_exacta = None
-                        if fecha_base_exacta is not None and fecha_base_exacta in occ_same_wd.index:
-                            occ_filtered = occ_same_wd[occ_same_wd.index < fecha_base_exacta]
-                        else:
-                            occ_filtered = occ_same_wd
-                        last_n = occ_filtered['ventas'].iloc[-N:]
-                        if not last_n.empty:
-                            df_last_n = pd.DataFrame({'fecha': last_n.index, 'ventas': last_n.values}).set_index('fecha')
-                            st.markdown(f"**Últimas {len(df_last_n)} ocurrencias del mismo día de la semana (año {base_year}):**")
-                            st.dataframe(df_last_n.style.format({'ventas': '€{:,.2f}'}), width='stretch')
-                        else:
-                            st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {base_year} excluyendo festivos/eventos.)")
+                            try:
+                                fecha_base_exacta = fecha.replace(year=base_year)
+                            except Exception:
+                                fecha_base_exacta = None
+                            if fecha_base_exacta is not None and fecha_base_exacta in occ_base.index:
+                                occ_filtered = occ_base[occ_base.index < fecha_base_exacta]
+                            else:
+                                occ_filtered = occ_base
+                            last_base = occ_filtered['ventas'].iloc[-N:]
+                            if not last_base.empty:
+                                df_last_base = pd.DataFrame({'fecha': last_base.index, 'ventas': last_base.values}).set_index('fecha')
+                                st.markdown(f"**Últimas {len(df_last_base)} ocurrencias del mismo día de la semana (año {base_year}) — usadas en 'Base Histórica':**")
+                                st.dataframe(df_last_base.style.format({'ventas': '€{:,.2f}'}), width='stretch')
+                            else:
+                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {base_year} excluyendo festivos/eventos.)")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
 
