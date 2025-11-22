@@ -1560,38 +1560,42 @@ def mostrar_indicador_crecimiento():
                 flecha = "→"
                 color = "#9aa0a6"  # gris neutro
             try:
-                # Render inline next to the H1. Percent/arrow are neutral; the € value gets the coloured "aura".
+                # New layout: centred card with light background so text can be black.
+                # Amount shows as signed number with '€' at the end (e.g. -72,000 €)
+                # Arrow is rendered below the euros as requested.
+                sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
+                delta_formatted = f"{delta_euros:+,.0f}"
                 card_html = f"""
                 <style>
                 .ytd-card {{
-                    border: 1px solid rgba(255,255,255,0.04);
-                    background: transparent;
-                    padding: 6px 8px;
-                    border-radius: 8px;
-                    text-align: right;
+                    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+                    padding: 8px 12px;
+                    border-radius: 12px;
+                    text-align: center;
                     font-family: inherit;
                     display:inline-block;
-                    min-width:120px;
+                    min-width:150px;
+                    box-shadow: 0 8px 24px rgba(2,6,23,0.25);
                 }}
-                .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:2px; color: #ffffff; opacity:0.95; }}
-                .ytd-card .arrow {{ margin-left:6px; font-weight:700; color: #ffffff; opacity:0.85 }}
-                .ytd-card .delta {{ font-size:0.95rem; margin-top:6px; color: #fff; font-weight:700; display:inline-block; padding:6px 10px; border-radius:16px; }}
-                .ytd-card .delta.green {{ background: linear-gradient(90deg, rgba(25,163,74,0.15), rgba(25,163,74,0.08)); box-shadow: 0 6px 18px rgba(25,163,74,0.18); color:#0b3a14 }}
-                .ytd-card .delta.red {{ background: linear-gradient(90deg, rgba(224,62,62,0.12), rgba(224,62,62,0.06)); box-shadow: 0 6px 18px rgba(224,62,62,0.18); color:#4a0b0b }}
-                .ytd-card .delta.neutral {{ background: rgba(255,255,255,0.03); box-shadow:none; color:#e6eef0 }}
+                .ytd-card .pct {{ font-size:0.95rem; color:#000; opacity:0.75; margin-bottom:6px; }}
+                .ytd-card .delta {{ font-size:1.05rem; font-weight:800; color:#000; padding:10px 14px; border-radius:14px; display:block; margin:0 auto; min-width:120px; }}
+                .ytd-card .delta.green {{ background: linear-gradient(90deg, #dff7e6, #eafcef); }}
+                .ytd-card .delta.red {{ background: linear-gradient(90deg, #fdecea, #fff4f4); }}
+                .ytd-card .delta.neutral {{ background: #f3f6f8; }}
+                .ytd-card .arrow {{ font-size:1.25rem; margin-top:8px; color: #000; opacity:0.9 }}
                 </style>
                 <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
-                  <div class="value">{variacion_pct:+.1f}% <span class="arrow">{flecha}</span></div>
-                  <div class="delta %s">{('€ ' + ('{0:,.0f}'.format(delta_euros)))}</div>
+                  <div class="pct">{variacion_pct:+.1f}%</div>
+                  <div class="delta {sign_class}">{delta_formatted} €</div>
+                  <div class="arrow">{flecha}</div>
                 </div>
-                """ % ("green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral"))
-                # Render inline (not in sidebar) so it stays next to the H1 column
+                """
                 st.markdown(card_html, unsafe_allow_html=True)
             except Exception:
                 try:
-                    # Fallback: render inline with same styling (avoid putting in sidebar).
+                    # Fallback: simple centered block with the same structure
                     sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
-                    fallback_html = f"<div style='text-align:right'><div style='font-weight:700;color:#ffffff'>{variacion_pct:+.1f}% {flecha}</div><div style='display:inline-block;padding:6px 10px;border-radius:12px' class='{sign_class}'>€ {delta_euros:,.0f}</div></div>"
+                    fallback_html = f"<div style='background:#fbfdff;padding:8px 12px;border-radius:12px;text-align:center;min-width:140px;box-shadow:0 6px 18px rgba(2,6,23,0.12)'><div style='color:#000;opacity:0.8'>{variacion_pct:+.1f}%</div><div style='font-weight:800;color:#000;padding:8px 12px;border-radius:12px;margin-top:6px'>{delta_euros:+,.0f} €</div><div style='margin-top:8px;color:#000'>{flecha}</div></div>"
                     st.markdown(fallback_html, unsafe_allow_html=True)
                 except Exception:
                     st.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
