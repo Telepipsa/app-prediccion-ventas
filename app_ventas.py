@@ -1554,11 +1554,12 @@ def mostrar_indicador_crecimiento():
                 color = "green"
             else:
                 color = "#006400"
-            st.markdown(f"""
-            <div style='position: absolute; top:20px; right:20px; background-color:#f9f9f9; padding:10px 20px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.2); z-index:9999; font-size:20px; color:{color}; font-weight:bold;' title='Diferencia: {delta_euros:,.0f}€'>
-                {flecha} {variacion_pct:.1f}%
-            </div>
-            """, unsafe_allow_html=True)
+            # Mostrar en la barra lateral como métrica en lugar de HTML flotante
+            try:
+                st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=f"€ {delta_euros:,.0f}")
+            except Exception:
+                # Fallback simple
+                st.sidebar.write(f"Crecimiento YTD: {variacion_pct:.1f}% (Δ € {delta_euros:,.0f})")
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
@@ -2034,24 +2035,12 @@ if display_results:
     except Exception:
         pass
 
-    # Opción: forzar render HTML para que los estilos se respeten exactamente
-    use_html_force = st.checkbox("Forzar render HTML (muestra colores y alineación exacta)", value=False)
+    # Mostrar la tabla con el estilo generado; evitamos forzar HTML/unsafe rendering.
     try:
-        if use_html_force:
-            import streamlit.components.v1 as components
-            html = style.set_table_attributes('role="table" class="dataframe styled-table"').to_html()
-            height_px = max(240, min(1200, (display_df.shape[0] + 2) * 48))
-            components.html(html, height=height_px, scrolling=True)
-        else:
-            st.dataframe(style, width='stretch', column_config=column_config)
+        st.dataframe(style, width='stretch', column_config=column_config)
     except Exception:
-        try:
-            import streamlit.components.v1 as components
-            html = style.set_table_attributes('role="table" class="dataframe styled-table"').to_html()
-            height_px = max(240, min(1200, (display_df.shape[0] + 2) * 48))
-            components.html(html, height=height_px, scrolling=True)
-        except Exception:
-            st.write(display_df)
+        # Fallback si hay problemas con Styler: mostrar el DataFrame plano
+        st.write(display_df)
     
     with st.expander("Ver detalles del cálculo de predicción"):
         details_text = f"""
@@ -2135,6 +2124,39 @@ if display_results:
                         except Exception:
                             sty = df_years.style.format({'Ventas': '€{:,.2f}'})
                         st.dataframe(sty, width='stretch')
+
+                    # Mostrar las últimas N ocurrencias del mismo weekday usadas en los cálculos
+                    try:
+                        N = 4
+                        target_wd = fecha.weekday()
+                        base_year = fecha.year - 1
+                        df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
+                        # excluir festivos y eventos
+                        festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+                        eventos_mask = st.session_state.get('eventos', {})
+                        mask_no_f = ~df_base_year.index.isin(festivos_b)
+                        mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
+                        df_clean = df_base_year[mask_no_f & mask_no_e]
+                        occ_same_wd = df_clean[df_clean.index.weekday == target_wd].sort_index()
+                        # Si hay una fecha base exacta, tomar las previas a esa fecha
+                        fecha_base_exacta = None
+                        try:
+                            fecha_base_exacta = fecha.replace(year=base_year)
+                        except Exception:
+                            fecha_base_exacta = None
+                        if fecha_base_exacta is not None and fecha_base_exacta in occ_same_wd.index:
+                            occ_filtered = occ_same_wd[occ_same_wd.index < fecha_base_exacta]
+                        else:
+                            occ_filtered = occ_same_wd
+                        last_n = occ_filtered['ventas'].iloc[-N:]
+                        if not last_n.empty:
+                            df_last_n = pd.DataFrame({'fecha': last_n.index, 'ventas': last_n.values}).set_index('fecha')
+                            st.markdown(f"**Últimas {len(df_last_n)} ocurrencias del mismo día de la semana (año {base_year}):**")
+                            st.dataframe(df_last_n.style.format({'ventas': '€{:,.2f}'}), width='stretch')
+                        else:
+                            st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {base_year} excluyendo festivos/eventos.)")
+                    except Exception:
+                        pass
 
                     if not df_summary.empty:
                         # Colorear CV/weights para visibilidad
