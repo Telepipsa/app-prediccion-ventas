@@ -1545,48 +1545,38 @@ def mostrar_indicador_crecimiento():
             if ventas_anterior > 0:
                 variacion_pct = ((ventas_actual - ventas_anterior) / ventas_anterior) * 100
             delta_euros = ventas_actual - ventas_anterior
-            flecha = "↑" if variacion_pct >= 0 else "↓" 
-            if variacion_pct < 0:
-                color = "red"
-            elif variacion_pct < 5:
-                color = "#e6b800"
-            elif variacion_pct < 15:
-                color = "green"
-            else:
-                color = "#006400"
-            # Mostrar la métrica en la parte superior derecha de la página
+            flecha = "↑" if variacion_pct >= 0 else "↓"
+            # User wants both percent and euro colored: green if non-negative, red if negative
+            color = "green" if variacion_pct >= 0 else "red"
             try:
-                cols = st.columns([7, 1])
-                with cols[1]:
-                    # Render a compact bordered card with percent, colored arrow and € delta.
-                    card_html = f"""
-                    <style>
-                    .ytd-card {{
-                        border: 1px solid rgba(255,255,255,0.06);
-                        background: rgba(255,255,255,0.01);
-                        padding: 8px 10px;
-                        border-radius: 8px;
-                        text-align: right;
-                        box-shadow: 0 6px 18px rgba(2,6,23,0.35);
-                        font-family: inherit;
-                    }}
-                    .ytd-card .label {{ font-size:0.85rem; color:var(--secondaryTextColor,#cfcfcf); }}
-                    .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:4px; }}
-                    .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; }}
-                    </style>
-                    <div class="ytd-card">
-                      <div class="label">Crecimiento YTD</div>
-                      <div class="value">{variacion_pct:.1f}% <span style="color:%s; font-size:1.0rem; margin-left:6px;">%s</span></div>
-                      <div class="delta">€ {delta_euros:,.0f}</div>
-                    </div>
-                    """ % (color, color, flecha)
-                    st.markdown(card_html, unsafe_allow_html=True)
+                # Compact card (no label text) so caller can place it inline with the title
+                card_html = f"""
+                <style>
+                .ytd-card {{
+                    border: 1px solid rgba(255,255,255,0.08);
+                    background: rgba(255,255,255,0.01);
+                    padding: 8px 10px;
+                    border-radius: 8px;
+                    text-align: right;
+                    box-shadow: 0 6px 18px rgba(2,6,23,0.25);
+                    font-family: inherit;
+                }}
+                .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:4px; color: %s; }}
+                .ytd-card .arrow {{ color: %s; margin-left:6px; font-weight:700; }}
+                .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; }}
+                </style>
+                <div class="ytd-card">
+                  <div class="value">{variacion_pct:.1f}% <span class="arrow">%s</span></div>
+                  <div class="delta">€ {delta_euros:,.0f}</div>
+                </div>
+                """ % (color, color, color, flecha)
+                st.markdown(card_html, unsafe_allow_html=True)
             except Exception:
-                # Fallback to sidebar simple metric (string delta keeps € sign and arrow semantics)
                 try:
-                    st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=f"€ {delta_euros:,.0f}")
+                    # Fallback: sidebar metric with formatted delta (keeps € symbol)
+                    st.sidebar.metric(label="", value=f"{variacion_pct:.1f}% {flecha}", delta=f"€ {delta_euros:,.0f}")
                 except Exception:
-                    st.sidebar.write(f"Crecimiento YTD: {variacion_pct:.1f}% (Δ € {delta_euros:,.0f})")
+                    st.sidebar.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
@@ -1719,12 +1709,14 @@ if st.session_state.get("show_delete_modal", False):
 # PÁGINA PRINCIPAL
 # =============================================================================
 
-st.title("📊 Panel de Predicción y Optimización de Personal")
-# Mostrar el indicador de crecimiento YTD en la misma fila del título
-try:
-    mostrar_indicador_crecimiento()
-except Exception:
-    pass
+cols_title = st.columns([9, 1])
+with cols_title[0]:
+    st.markdown('<h1 id="panel-de-prediccion-y-optimizacion-de-personal">📊 Panel de Predicción y Optimización de Personal</h1>', unsafe_allow_html=True)
+with cols_title[1]:
+    try:
+        mostrar_indicador_crecimiento()
+    except Exception:
+        pass
 
 with st.sidebar:
     vista_compacta = st.checkbox("👉 Vista Compacta (solo 7 días en gráfica de líneas - recomendado para móvil)", value=False, help="Activa para ver solo la semana de predicción en la gráfica de líneas, ideal para pantallas pequeñas.")
@@ -2229,18 +2221,30 @@ if display_results:
                                 except Exception:
                                     pass
 
-                                df_comp_display = df_comp.copy()
-                                df_comp_display['ventas_actual'] = df_comp_display['ventas_actual'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
-                                df_comp_display['ventas_anterior'] = df_comp_display['ventas_anterior'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
-                                df_comp_display['pct_change'] = df_comp_display['pct_change'].map(lambda x: f"{x:+.1f}%" if not pd.isna(x) else "")
-
                                 st.markdown(f"**Comparación últimas {N} ocurrencias — año {current_year} vs {base_year}:**")
-                                # Reemplazamos los dos cuadros separados por una única tabla combinada
+                                # Usamos el DataFrame numérico para formatear y colorear la columna pct_change
                                 try:
-                                    sty_comb = df_comp_display.style.format({'fecha_actual': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
-                                                                           'fecha_anterior': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else ''})
-                                    st.dataframe(sty_comb, width='stretch')
+                                    sty = df_comp.style.format({
+                                        'fecha_actual': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
+                                        'fecha_anterior': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
+                                        'ventas_actual': '€{:,.2f}',
+                                        'ventas_anterior': '€{:,.2f}',
+                                        'pct_change': '{:+.1f}%'
+                                    })
+                                    def color_pct(val):
+                                        try:
+                                            v = float(val)
+                                        except Exception:
+                                            return ''
+                                        return 'color: green' if v > 0 else ('color: red' if v < 0 else '')
+                                    sty = sty.applymap(lambda v: 'color: green' if (isinstance(v, (int, float)) and v > 0) else ('color: red' if (isinstance(v, (int, float)) and v < 0) else ''), subset=['pct_change'])
+                                    st.dataframe(sty, width='stretch')
                                 except Exception:
+                                    # Fallback: format as strings and show without extra styling
+                                    df_comp_display = df_comp.copy()
+                                    df_comp_display['ventas_actual'] = df_comp_display['ventas_actual'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                    df_comp_display['ventas_anterior'] = df_comp_display['ventas_anterior'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                    df_comp_display['pct_change'] = df_comp_display['pct_change'].map(lambda x: f"{x:+.1f}%" if not pd.isna(x) else "")
                                     st.dataframe(df_comp_display, width='stretch')
                         except Exception:
                             pass
