@@ -55,7 +55,6 @@ if os.path.exists(dev_no_auth_path):
 if not st.session_state.autenticado:
     st.title("🔐 Acceso restringido")
     st.markdown("Introduce la contraseña para acceder a la aplicación.")
-    password_input = st.text_input("Contraseña", type="password", key="__pw_input")
 
     # Acceso seguro a secrets: usa get() para evitar KeyError si la clave no existe
     try:
@@ -88,27 +87,36 @@ if not st.session_state.autenticado:
         st.info("Para desarrollo local puedes crear un archivo vacío `.streamlit/DEV_NO_AUTH` o configurar `PASSWORD` en `.streamlit/secrets.toml`.")
         st.stop()
 
-    # Botón para enviar la contraseña y comprobarla. Evitamos continuar si no se autentica.
     if 'login_attempts' not in st.session_state:
         st.session_state.login_attempts = 0
 
-    if st.button('Acceder'):
+    # Usar un form permite que ENTER envíe el formulario además del botón
+    with st.form("login_form"):
+        password_input = st.text_input("Contraseña", type="password", key="__pw_input")
+        submitted = st.form_submit_button('Acceder')
+
+    if submitted:
         if password_input and password_input == PASSWORD_SECRET:
-            # Marcar como autenticado y continuar en la siguiente ejecución.
-            # No es necesario forzar un "rerun" manual: Streamlit re-ejecuta
-            # el script tras la interacción del botón y `st.session_state`
-            # persistirá la clave `autenticado`.
             st.session_state.autenticado = True
-            st.success('Acceso correcto.')
+            # Intentamos recargar la app inmediatamente para que el bloque
+            # de login no se muestre en la siguiente renderización.
+            try:
+                if hasattr(st, 'experimental_rerun') and callable(st.experimental_rerun):
+                    st.experimental_rerun()
+                else:
+                    st.success('Acceso correcto. Por favor, recarga la página para continuar.')
+                    st.stop()
+            except Exception:
+                st.success('Acceso correcto. Por favor, recarga la página para continuar.')
+                st.stop()
         else:
             st.session_state.login_attempts += 1
             st.error('Contraseña incorrecta. Inténtalo de nuevo.')
             if st.session_state.login_attempts >= 5:
                 st.error('Demasiados intentos. Reinicia la app para volver a intentarlo.')
                 st.stop()
-
-    # Si tras la interacción no estamos autenticados, detener la ejecución aquí.
-    if not st.session_state.autenticado:
+    else:
+        # Si no se ha firmado el form (ni pulsado enter ni el botón), no continuar
         st.stop()
 
 
