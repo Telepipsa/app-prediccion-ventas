@@ -1542,12 +1542,23 @@ def mostrar_indicador_crecimiento():
             fin_anterior = fecha_limite_actual.replace(year=previous_year)
             ventas_actual = df[(df.index >= inicio_actual) & (df.index <= fecha_limite_actual)]['ventas'].sum()
             ventas_anterior = df[(df.index >= inicio_anterior) & (df.index <= fin_anterior)]['ventas'].sum()
-            if ventas_anterior > 0:
+            # Calcular variación en % y delta en euros. Tratamos casos con 0 en año anterior.
+            if ventas_anterior and ventas_anterior > 0:
                 variacion_pct = ((ventas_actual - ventas_anterior) / ventas_anterior) * 100
+            else:
+                # Si no hay ventas en el año anterior, definimos variación como 0 (sin tendencia)
+                variacion_pct = 0.0
             delta_euros = ventas_actual - ventas_anterior
-            flecha = "↑" if variacion_pct >= 0 else "↓"
-            # User wants both percent and euro colored: green if non-negative, red if negative
-            color = "green" if variacion_pct >= 0 else "red"
+            # Determinar signo/colores y flecha de forma coherente:
+            if variacion_pct > 0 or delta_euros > 0:
+                flecha = "↑"
+                color = "#19a34a"  # verde consistente
+            elif variacion_pct < 0 or delta_euros < 0:
+                flecha = "↓"
+                color = "#e03e3e"  # rojo consistente
+            else:
+                flecha = "→"
+                color = "#9aa0a6"  # gris neutro
             try:
                 # Compact card (no label text) so caller can place it inline with the title
                 card_html = f"""
@@ -1563,18 +1574,21 @@ def mostrar_indicador_crecimiento():
                 }}
                 .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:4px; color: %s; }}
                 .ytd-card .arrow {{ color: %s; margin-left:6px; font-weight:700; }}
-                .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; }}
+                .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; font-weight:600; }}
                 </style>
-                <div class="ytd-card">
-                  <div class="value">{variacion_pct:.1f}% <span class="arrow">%s</span></div>
-                  <div class="delta">€ {delta_euros:,.0f}</div>
+                <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
+                  <div class="value">{variacion_pct:+.1f}% <span class="arrow">%s</span></div>
+                  <div class="delta">{('€ ' + ('{0:,.0f}'.format(delta_euros)))}</div>
                 </div>
                 """ % (color, color, color, flecha)
                 st.markdown(card_html, unsafe_allow_html=True)
             except Exception:
                 try:
                     # Fallback: sidebar metric with formatted delta (keeps € symbol)
-                    st.sidebar.metric(label="", value=f"{variacion_pct:.1f}% {flecha}", delta=f"€ {delta_euros:,.0f}")
+                    # Forzar color en fallback: construimos simple texto coloreado
+                    sign_color = color
+                    st.sidebar.markdown(f"<div style='text-align:right; color:{sign_color}; font-weight:700'>{variacion_pct:+.1f}% {flecha}</div>", unsafe_allow_html=True)
+                    st.sidebar.markdown(f"<div style='text-align:right; color:{sign_color}; background:#0b3a14; display:inline-block; padding:4px 8px; border-radius:12px'>€ {delta_euros:,.0f}</div>", unsafe_allow_html=True)
                 except Exception:
                     st.sidebar.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
 
