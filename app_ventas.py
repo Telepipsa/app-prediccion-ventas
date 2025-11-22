@@ -25,6 +25,9 @@ from datetime import datetime, timedelta
 import holidays
 import pulp
 from io import BytesIO
+import hmac
+import hashlib
+import time
 import numpy as np  # Añadido para cálculos de tendencia
 import urllib.parse
 import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25 
@@ -81,6 +84,57 @@ if not st.session_state.autenticado:
             except Exception:
                 PASSWORD_SECRET = None
 
+    # --- Autenticación persistente local (opcional para desarrollo) ---
+    # Guardamos un token HMAC simple en `.streamlit/.auth_token` para permitir
+    # restaurar la sesión después de un F5/refresh en entornos locales.
+    # El token es un timestamp + firma HMAC-SHA256 basada en la contraseña.
+    proyecto_dir = os.path.dirname(os.path.abspath(__file__))
+    token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
+
+    def _validate_auth_token(path, secret, max_age_days=7):
+        try:
+            if not path or not os.path.exists(path):
+                return False
+            with open(path, 'r', encoding='utf-8') as tf:
+                content = tf.read().strip()
+            if ':' not in content:
+                return False
+            ts_str, sig = content.split(':', 1)
+            ts = int(ts_str)
+            # Check age
+            if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
+                return False
+            # Recompute expected signature
+            expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, sig)
+        except Exception:
+            return False
+
+    def _write_auth_token(path, secret):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            ts = str(int(time.time()))
+            sig = hmac.new(secret.encode('utf-8'), ts.encode('utf-8'), hashlib.sha256).hexdigest()
+            with open(path, 'w', encoding='utf-8') as tf:
+                tf.write(f"{ts}:{sig}")
+            # set restrictive permissions where possible (best-effort)
+            try:
+                os.chmod(path, 0o600)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Si hay token válido y tenemos la secret, restaurar sesión automáticamente
+    if PASSWORD_SECRET and _validate_auth_token(token_path, PASSWORD_SECRET):
+        st.session_state.autenticado = True
+        if 'auth_restored_msg' not in st.session_state:
+            try:
+                st.info('Sesión restaurada desde token local (.streamlit/.auth_token).')
+            except Exception:
+                pass
+            st.session_state.auth_restored_msg = True
+
     # Si no hay contraseña configurada o está vacía, advertimos y bloqueamos el resto de la app
     if not PASSWORD_SECRET:
         st.warning("No se ha encontrado la clave 'PASSWORD' en `st.secrets` ni en `.streamlit/secrets.toml`.")
@@ -98,11 +152,29 @@ if not st.session_state.autenticado:
     if submitted:
         if password_input and password_input == PASSWORD_SECRET:
             # Marcar sesión como autenticada y continuar en la misma ejecución.
-            # Evitamos forzar rerun; Streamlit re-renderizará la página tras la interacción
-            # y, como `st.session_state.autenticado` ya está True, el bloque de login
-            # no interferirá con la visualización del resto de la app.
+            # Marcar sesión como autenticada y forzar un rerun inmediato para
+            # que el bloque de login deje de mostrarse en la misma petición.
+            # Esto permite que al escribir la contraseña y pulsar Enter se
+            # acceda automáticamente al contenido sin pedir recargar manualmente.
             st.session_state.autenticado = True
             st.success('Acceso correcto.')
+            try:
+                # Escribir token de persistencia local (siempre que exista una secret válida)
+                if PASSWORD_SECRET:
+                    try:
+                        _write_auth_token(token_path, PASSWORD_SECRET)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                st.experimental_rerun()
+            except Exception:
+                # Si por alguna razón experimental_rerun no está disponible,
+                # continuamos en la misma ejecución (debería seguir funcionando),
+                # pero el rerun es la forma recomendada para ocultar el formulario
+                # inmediatamente tras autenticar.
+                pass
         else:
             st.session_state.login_attempts += 1
             st.error('Contraseña incorrecta. Inténtalo de nuevo.')
