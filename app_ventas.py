@@ -1554,12 +1554,21 @@ def mostrar_indicador_crecimiento():
                 color = "green"
             else:
                 color = "#006400"
-            # Mostrar en la barra lateral como métrica en lugar de HTML flotante
+            # Mostrar la métrica en la parte superior derecha de la página
             try:
-                st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=f"€ {delta_euros:,.0f}")
+                cols = st.columns([7, 1])
+                with cols[1]:
+                    # Pasar `delta` como número hace que Streamlit dibuje la flecha/colores correctamente
+                    st.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=round(delta_euros, 0))
+                    # Mostrar debajo una versión con formato de moneda para mayor claridad
+                    st.caption(f"Δ € {delta_euros:,.0f}")
             except Exception:
-                # Fallback simple
-                st.sidebar.write(f"Crecimiento YTD: {variacion_pct:.1f}% (Δ € {delta_euros:,.0f})")
+                # Si el layout de la página falla, caer a la barra lateral como fallback
+                try:
+                    st.sidebar.metric(label="Crecimiento YTD", value=f"{variacion_pct:.1f}%", delta=round(delta_euros, 0))
+                    st.sidebar.caption(f"Δ € {delta_euros:,.0f}")
+                except Exception:
+                    st.sidebar.write(f"Crecimiento YTD: {variacion_pct:.1f}% (Δ € {delta_euros:,.0f})")
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
@@ -2130,49 +2139,87 @@ if display_results:
                         N = 4
                         target_wd = fecha.weekday()
 
-                        # 1) Últimas N ocurrencias en el AÑO ACTUAL (usadas en 'media reciente')
+                        # Mostrar una sola tabla combinada con las últimas N ocurrencias del AÑO ACTUAL
+                        # y las correspondientes del AÑO ANTERIOR (Base Histórica), además del % de cambio.
                         try:
                             current_year = fecha.year
+                            base_year = fecha.year - 1
+
+                            # Preparar datos año actual
                             df_curr_year = st.session_state.df_historico[st.session_state.df_historico.index.year == current_year].copy()
                             occ_curr = df_curr_year[df_curr_year.index.weekday == target_wd].sort_index()
                             occ_curr_before = occ_curr[occ_curr.index < fecha]
                             last_curr = occ_curr_before['ventas'].iloc[-N:]
-                            if not last_curr.empty:
-                                df_last_curr = pd.DataFrame({'fecha': last_curr.index, 'ventas': last_curr.values}).set_index('fecha')
-                                st.markdown(f"**Últimas {len(df_last_curr)} ocurrencias del mismo día de la semana (año {current_year}) — usadas en 'Media Reciente':**")
-                                st.dataframe(df_last_curr.style.format({'ventas': '€{:,.2f}'}), width='stretch')
-                            else:
-                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {current_year} antes de {fecha.strftime('%d/%m/%Y')}).")
-                        except Exception:
-                            pass
 
-                        # 2) Últimas N ocurrencias en el AÑO BASE (excluyendo festivos/eventos) — usadas para base histórica
-                        try:
-                            base_year = fecha.year - 1
+                            # Preparar datos año base (excluyendo festivos y eventos) y siempre tomar
+                            # las ocurrencias anteriores a la fecha equivalente en el año base.
                             df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
-                            # excluir festivos y eventos para la comparación histórica
                             festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
                             eventos_mask = st.session_state.get('eventos', {})
                             mask_no_f = ~df_base_year.index.isin(festivos_b)
                             mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
                             df_clean = df_base_year[mask_no_f & mask_no_e]
                             occ_base = df_clean[df_clean.index.weekday == target_wd].sort_index()
-                            fecha_base_exacta = None
+                            # Fecha de referencia en el año base (aunque no exista como fila)
                             try:
-                                fecha_base_exacta = fecha.replace(year=base_year)
+                                fecha_base_ref = fecha.replace(year=base_year)
                             except Exception:
-                                fecha_base_exacta = None
-                            if fecha_base_exacta is not None and fecha_base_exacta in occ_base.index:
-                                occ_filtered = occ_base[occ_base.index < fecha_base_exacta]
+                                fecha_base_ref = pd.Timestamp(base_year, fecha.month, fecha.day)
+                            occ_base_before = occ_base[occ_base.index < fecha_base_ref]
+                            last_base = occ_base_before['ventas'].iloc[-N:]
+
+                            # Si no hay datos suficientes, informar al usuario
+                            if (last_curr.empty and last_base.empty):
+                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {current_year} ni en {base_year} antes de la fecha de referencia.)")
                             else:
-                                occ_filtered = occ_base
-                            last_base = occ_filtered['ventas'].iloc[-N:]
-                            if not last_base.empty:
-                                df_last_base = pd.DataFrame({'fecha': last_base.index, 'ventas': last_base.values}).set_index('fecha')
-                                st.markdown(f"**Últimas {len(df_last_base)} ocurrencias del mismo día de la semana (año {base_year}) — usadas en 'Base Histórica':**")
-                                st.dataframe(df_last_base.style.format({'ventas': '€{:,.2f}'}), width='stretch')
-                            else:
-                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {base_year} excluyendo festivos/eventos.)")
+                                # Construir tabla combinada; invertimos para mostrar de más reciente a más antiguo
+                                curr_dates = list(last_curr.index)[::-1]
+                                curr_vals = list(last_curr.values)[::-1]
+                                base_dates = list(last_base.index)[::-1]
+                                base_vals = list(last_base.values)[::-1]
+                                max_len = max(len(curr_vals), len(base_vals))
+                                rows = []
+                                for i in range(max_len):
+                                    c_date = curr_dates[i] if i < len(curr_dates) else pd.NaT
+                                    c_val = curr_vals[i] if i < len(curr_vals) else np.nan
+                                    b_date = base_dates[i] if i < len(base_dates) else pd.NaT
+                                    b_val = base_vals[i] if i < len(base_vals) else np.nan
+                                    if not (pd.isna(b_val) or b_val == 0):
+                                        pct = (c_val - b_val) / b_val * 100.0
+                                    else:
+                                        pct = np.nan
+                                    rows.append({
+                                        'fecha_actual': c_date,
+                                        'ventas_actual': c_val,
+                                        'fecha_anterior': b_date,
+                                        'ventas_anterior': b_val,
+                                        'pct_change': pct
+                                    })
+
+                                df_comp = pd.DataFrame(rows)
+                                # Formatear columnas
+                                try:
+                                    df_comp['fecha_actual'] = pd.to_datetime(df_comp['fecha_actual'])
+                                except Exception:
+                                    pass
+                                try:
+                                    df_comp['fecha_anterior'] = pd.to_datetime(df_comp['fecha_anterior'])
+                                except Exception:
+                                    pass
+
+                                df_comp_display = df_comp.copy()
+                                df_comp_display['ventas_actual'] = df_comp_display['ventas_actual'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                df_comp_display['ventas_anterior'] = df_comp_display['ventas_anterior'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                df_comp_display['pct_change'] = df_comp_display['pct_change'].map(lambda x: f"{x:+.1f}%" if not pd.isna(x) else "")
+
+                                st.markdown(f"**Comparación últimas {N} ocurrencias — año {current_year} vs {base_year}:**")
+                                # Reemplazamos los dos cuadros separados por una única tabla combinada
+                                try:
+                                    sty_comb = df_comp_display.style.format({'fecha_actual': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
+                                                                           'fecha_anterior': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else ''})
+                                    st.dataframe(sty_comb, width='stretch')
+                                except Exception:
+                                    st.dataframe(df_comp_display, width='stretch')
                         except Exception:
                             pass
                     except Exception:
