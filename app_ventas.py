@@ -81,8 +81,8 @@ if not st.session_state.autenticado:
             except Exception:
                 PASSWORD_SECRET = None
 
-    # Si no hay contraseña configurada, advertimos y bloqueamos el resto de la app
-    if PASSWORD_SECRET is None:
+    # Si no hay contraseña configurada o está vacía, advertimos y bloqueamos el resto de la app
+    if not PASSWORD_SECRET:
         st.warning("No se ha encontrado la clave 'PASSWORD' en `st.secrets` ni en `.streamlit/secrets.toml`.")
         st.info("Para desarrollo local puedes crear un archivo vacío `.streamlit/DEV_NO_AUTH` o configurar `PASSWORD` en `.streamlit/secrets.toml`.")
         st.stop()
@@ -97,18 +97,12 @@ if not st.session_state.autenticado:
 
     if submitted:
         if password_input and password_input == PASSWORD_SECRET:
+            # Marcar sesión como autenticada y continuar en la misma ejecución.
+            # Evitamos forzar rerun; Streamlit re-renderizará la página tras la interacción
+            # y, como `st.session_state.autenticado` ya está True, el bloque de login
+            # no interferirá con la visualización del resto de la app.
             st.session_state.autenticado = True
-            # Intentamos recargar la app inmediatamente para que el bloque
-            # de login no se muestre en la siguiente renderización.
-            try:
-                if hasattr(st, 'experimental_rerun') and callable(st.experimental_rerun):
-                    st.experimental_rerun()
-                else:
-                    st.success('Acceso correcto. Por favor, recarga la página para continuar.')
-                    st.stop()
-            except Exception:
-                st.success('Acceso correcto. Por favor, recarga la página para continuar.')
-                st.stop()
+            st.success('Acceso correcto.')
         else:
             st.session_state.login_attempts += 1
             st.error('Contraseña incorrecta. Inténtalo de nuevo.')
