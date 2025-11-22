@@ -1565,32 +1565,54 @@ def mostrar_indicador_crecimiento():
                 # Arrow is rendered below the euros as requested.
                 sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
                 delta_formatted = f"{delta_euros:+,.0f}"
+                # Refined visual: glassy card, pill for euros, SVG arrow below, subtle shadows
                 card_html = f"""
                 <style>
                 .ytd-card {{
-                    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
-                    padding: 8px 12px;
-                    border-radius: 12px;
+                    background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(250,250,250,0.9) 100%);
+                    padding: 10px 14px;
+                    border-radius: 14px;
                     text-align: center;
-                    font-family: inherit;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
                     display:inline-block;
                     min-width:150px;
-                    box-shadow: 0 8px 24px rgba(2,6,23,0.25);
+                    box-shadow: 0 10px 30px rgba(7,12,20,0.28);
+                    backdrop-filter: blur(6px);
                 }}
-                .ytd-card .pct {{ font-size:0.95rem; color:#000; opacity:0.75; margin-bottom:6px; }}
-                .ytd-card .delta {{ font-size:1.05rem; font-weight:800; color:#000; padding:10px 14px; border-radius:14px; display:block; margin:0 auto; min-width:120px; }}
-                .ytd-card .delta.green {{ background: linear-gradient(90deg, #dff7e6, #eafcef); }}
-                .ytd-card .delta.red {{ background: linear-gradient(90deg, #fdecea, #fff4f4); }}
-                .ytd-card .delta.neutral {{ background: #f3f6f8; }}
-                .ytd-card .arrow {{ font-size:1.25rem; margin-top:8px; color: #000; opacity:0.9 }}
+                .ytd-card .pct {{ font-size:0.92rem; color:#222; opacity:0.85; margin-bottom:6px; font-weight:600; }}
+                .ytd-card .delta {{ font-size:1.1rem; font-weight:800; color:#000; padding:10px 16px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; margin:0 auto; min-width:120px; box-shadow: 0 6px 18px rgba(2,6,23,0.06); }}
+                .ytd-card .delta.green {{ background: linear-gradient(90deg, #e9f7ee, #f6fffb); color:#000; }}
+                .ytd-card .delta.red {{ background: linear-gradient(90deg, #fff1f1, #fff7f7); color:#000; }}
+                .ytd-card .delta.neutral {{ background: #f3f6f8; color:#000; }}
+                .ytd-card .arrow {{ margin-top:8px; color: inherit; display:flex; align-items:center; justify-content:center; }}
+                .ytd-card svg {{ display:block; }}
+                @media (max-width:600px) {{
+                    .ytd-card {{ min-width:120px; padding:8px 10px; }}
+                    .ytd-card .delta {{ font-size:1rem; padding:8px 12px; min-width:100px; }}
+                }}
                 </style>
                 <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
                   <div class="pct">{variacion_pct:+.1f}%</div>
                   <div class="delta {sign_class}">{delta_formatted} €</div>
-                  <div class="arrow">{flecha}</div>
+                  <div class="arrow">{flecha_html}</div>
                 </div>
                 """
-                st.markdown(card_html, unsafe_allow_html=True)
+                # Build flecha_html using a small inline SVG (up or down) colored to match
+                if color == "#19a34a":
+                    flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 19V5" stroke="#19a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 12l7-7" stroke="#19a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                elif color == "#e03e3e":
+                    flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 5v14" stroke="#e03e3e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 12l-7 7" stroke="#e03e3e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                else:
+                    flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 12h14" stroke="#9aa0a6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                try:
+                    st.markdown(card_html, unsafe_allow_html=True)
+                except Exception:
+                    try:
+                        # Fallback: simple centered block with similar look
+                        fallback_html = f"<div style='background:#fbfdff;padding:8px 12px;border-radius:12px;text-align:center;min-width:140px;box-shadow:0 6px 18px rgba(2,6,23,0.12)'><div style='color:#000;opacity:0.85'>{variacion_pct:+.1f}%</div><div style='font-weight:800;color:#000;padding:8px 12px;border-radius:12px;margin-top:6px'>{delta_euros:+,.0f} €</div><div style='margin-top:8px;color:{color}'>{flecha}</div></div>"
+                        st.markdown(fallback_html, unsafe_allow_html=True)
+                    except Exception:
+                        st.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
             except Exception:
                 try:
                     # Fallback: simple centered block with the same structure
