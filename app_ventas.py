@@ -94,26 +94,21 @@ if not st.session_state.autenticado:
 
     if st.button('Acceder'):
         if password_input and password_input == PASSWORD_SECRET:
+            # Marcar como autenticado y continuar en la siguiente ejecución.
+            # No es necesario forzar un "rerun" manual: Streamlit re-ejecuta
+            # el script tras la interacción del botón y `st.session_state`
+            # persistirá la clave `autenticado`.
             st.session_state.autenticado = True
-            # Intentamos recargar la app; si la función no existe o falla,
-            # mostramos un mensaje y detenemos la ejecución para evitar errores.
-            try:
-                if hasattr(st, 'experimental_rerun') and callable(st.experimental_rerun):
-                    st.experimental_rerun()
-                else:
-                    st.success('Acceso correcto. Por favor, recarga la página para continuar.')
-                    st.stop()
-            except Exception:
-                st.success('Acceso correcto. Por favor, recarga la página para continuar.')
-                st.stop()
+            st.success('Acceso correcto.')
         else:
             st.session_state.login_attempts += 1
             st.error('Contraseña incorrecta. Inténtalo de nuevo.')
             if st.session_state.login_attempts >= 5:
                 st.error('Demasiados intentos. Reinicia la app para volver a intentarlo.')
                 st.stop()
-    else:
-        # Si no se ha pulsado Acceder, no continuar con el resto de la aplicación
+
+    # Si tras la interacción no estamos autenticados, detener la ejecución aquí.
+    if not st.session_state.autenticado:
         st.stop()
 
 
