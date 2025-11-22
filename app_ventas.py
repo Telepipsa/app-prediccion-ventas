@@ -1560,37 +1560,41 @@ def mostrar_indicador_crecimiento():
                 flecha = "→"
                 color = "#9aa0a6"  # gris neutro
             try:
-                # Compact card (no label text) so caller can place it inline with the title
+                # Render inline next to the H1. Percent/arrow are neutral; the € value gets the coloured "aura".
                 card_html = f"""
                 <style>
                 .ytd-card {{
-                    border: 1px solid rgba(255,255,255,0.08);
-                    background: rgba(255,255,255,0.01);
-                    padding: 8px 10px;
+                    border: 1px solid rgba(255,255,255,0.04);
+                    background: transparent;
+                    padding: 6px 8px;
                     border-radius: 8px;
                     text-align: right;
-                    box-shadow: 0 6px 18px rgba(2,6,23,0.25);
                     font-family: inherit;
+                    display:inline-block;
+                    min-width:120px;
                 }}
-                .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:4px; color: %s; }}
-                .ytd-card .arrow {{ color: %s; margin-left:6px; font-weight:700; }}
-                .ytd-card .delta {{ font-size:0.95rem; margin-top:2px; color: %s; font-weight:600; }}
+                .ytd-card .value {{ font-size:1.05rem; font-weight:700; margin-top:2px; color: #ffffff; opacity:0.95; }}
+                .ytd-card .arrow {{ margin-left:6px; font-weight:700; color: #ffffff; opacity:0.85 }}
+                .ytd-card .delta {{ font-size:0.95rem; margin-top:6px; color: #fff; font-weight:700; display:inline-block; padding:6px 10px; border-radius:16px; }}
+                .ytd-card .delta.green {{ background: linear-gradient(90deg, rgba(25,163,74,0.15), rgba(25,163,74,0.08)); box-shadow: 0 6px 18px rgba(25,163,74,0.18); color:#0b3a14 }}
+                .ytd-card .delta.red {{ background: linear-gradient(90deg, rgba(224,62,62,0.12), rgba(224,62,62,0.06)); box-shadow: 0 6px 18px rgba(224,62,62,0.18); color:#4a0b0b }}
+                .ytd-card .delta.neutral {{ background: rgba(255,255,255,0.03); box-shadow:none; color:#e6eef0 }}
                 </style>
                 <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
-                  <div class="value">{variacion_pct:+.1f}% <span class="arrow">%s</span></div>
-                  <div class="delta">{('€ ' + ('{0:,.0f}'.format(delta_euros)))}</div>
+                  <div class="value">{variacion_pct:+.1f}% <span class="arrow">{flecha}</span></div>
+                  <div class="delta %s">{('€ ' + ('{0:,.0f}'.format(delta_euros)))}</div>
                 </div>
-                """ % (color, color, color, flecha)
+                """ % ("green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral"))
+                # Render inline (not in sidebar) so it stays next to the H1 column
                 st.markdown(card_html, unsafe_allow_html=True)
             except Exception:
                 try:
-                    # Fallback: sidebar metric with formatted delta (keeps € symbol)
-                    # Forzar color en fallback: construimos simple texto coloreado
-                    sign_color = color
-                    st.sidebar.markdown(f"<div style='text-align:right; color:{sign_color}; font-weight:700'>{variacion_pct:+.1f}% {flecha}</div>", unsafe_allow_html=True)
-                    st.sidebar.markdown(f"<div style='text-align:right; color:{sign_color}; background:#0b3a14; display:inline-block; padding:4px 8px; border-radius:12px'>€ {delta_euros:,.0f}</div>", unsafe_allow_html=True)
+                    # Fallback: render inline with same styling (avoid putting in sidebar).
+                    sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
+                    fallback_html = f"<div style='text-align:right'><div style='font-weight:700;color:#ffffff'>{variacion_pct:+.1f}% {flecha}</div><div style='display:inline-block;padding:6px 10px;border-radius:12px' class='{sign_class}'>€ {delta_euros:,.0f}</div></div>"
+                    st.markdown(fallback_html, unsafe_allow_html=True)
                 except Exception:
-                    st.sidebar.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
+                    st.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
 
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
