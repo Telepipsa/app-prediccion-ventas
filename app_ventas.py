@@ -630,7 +630,7 @@ def calcular_impacto_evento_para_fecha(fecha_actual, df_historico, eventos):
     detalle['metodo'] = metodo
     return detalle
 
-def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
+def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclude_eventos=True):
     base_year = fecha_actual.year - 1
     fecha_base_exacta = fecha_actual.replace(year=base_year)
     fecha_str_base = fecha_base_exacta.strftime('%Y-%m-%d')
@@ -644,7 +644,10 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
         df_mes = df_base[df_base.index.month == mes].copy()
         festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
         mask_no_festivo = ~df_mes.index.isin(festivos_base)
-        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+        if exclude_eventos:
+            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+        else:
+            mask_no_event = pd.Series(True, index=df_mes.index)
         df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
         # Buscar un día en el mismo week-of-month y weekday (p. ej. primer lunes de diciembre)
         candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
@@ -665,7 +668,10 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
     df_mes = df_base[df_base.index.month == mes].copy()
     festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
     mask_no_festivo = ~df_mes.index.isin(festivos_base)
-    mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+    if exclude_eventos:
+        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+    else:
+        mask_no_event = pd.Series(True, index=df_mes.index)
     df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
     candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
     if not candidates.empty:
@@ -765,7 +771,10 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         avg_pct_mom = 0.0
         pct_changes = []
         fecha_base_historica, ventas_base_historica = obtener_dia_base_historica(fecha_actual, df_historico)
-        ventas_base, fecha_base_str = calcular_base_historica_para_dia(fecha_actual, df_base, eventos)
+        # Si la fecha actual es un evento manual, incluir también fechas marcadas como "evento"
+        # en la búsqueda de la base histórica (no excluir eventos manuales del histórico base)
+        is_evento_manual = (fecha_str in eventos)
+        ventas_base, fecha_base_str = calcular_base_historica_para_dia(fecha_actual, df_base, eventos, exclude_eventos=(not is_evento_manual))
         if pd.isna(ventas_base): ventas_base = 0.0
 
         # Si la fecha base exacta existe y en el año base era festivo/víspera,
