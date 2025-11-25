@@ -576,6 +576,60 @@ def es_vispera_de_festivo(fecha_dt):
     except Exception:
         return False
 
+def calcular_impacto_evento_para_fecha(fecha_actual, df_historico, eventos):
+    """
+    Helper para depuración: calcula el 'impacto_evento' que la app aplicaría
+    para una `fecha_actual` dada usando la misma lógica que en la predicción.
+    Devuelve un dict con flags y valores intermedios para verificar comportamiento.
+    """
+    detalle = {}
+    try:
+        fecha_ts = pd.to_datetime(fecha_actual)
+    except Exception:
+        fecha_ts = pd.to_datetime(str(fecha_actual))
+    fecha_str = fecha_ts.strftime('%Y-%m-%d')
+    detalle['fecha'] = fecha_str
+    eventos = eventos or {}
+    is_evento_manual = fecha_str in eventos
+    is_festivo_auto = fecha_ts in festivos_es
+    is_vispera = es_vispera_de_festivo(fecha_ts)
+    detalle['is_evento_manual'] = bool(is_evento_manual)
+    detalle['is_festivo_auto'] = bool(is_festivo_auto)
+    detalle['is_vispera'] = bool(is_vispera)
+
+    impacto_evento = 1.0
+    metodo = None
+    if is_evento_manual:
+        evento_data = eventos.get(fecha_str, {})
+        detalle['descripcion'] = evento_data.get('descripcion')
+        # Si la fecha existe en histórico, calcular ratio frente a la semana anterior
+        if fecha_ts in df_historico.index:
+            fecha_anterior = fecha_ts - timedelta(days=7)
+            detalle['fecha_anterior'] = fecha_anterior.strftime('%Y-%m-%d')
+            if fecha_anterior in df_historico.index:
+                ventas_anterior = float(df_historico.loc[fecha_anterior, 'ventas'])
+                ventas_dia = float(df_historico.loc[fecha_ts, 'ventas'])
+                detalle['ventas_anterior'] = ventas_anterior
+                detalle['ventas_dia'] = ventas_dia
+                if ventas_anterior > 0:
+                    impacto_evento = ventas_dia / ventas_anterior
+                    metodo = 'historical_week_ratio'
+        # Si se proporcionó un ajuste manual, aplicar
+        if metodo is None and isinstance(evento_data, dict) and 'impacto_manual_pct' in evento_data:
+            try:
+                impacto_evento = 1.0 + (float(evento_data.get('impacto_manual_pct', 0)) / 100.0)
+                metodo = 'manual_pct'
+            except Exception:
+                pass
+    elif is_festivo_auto:
+        metodo = 'festivo_auto'
+    else:
+        metodo = 'none'
+
+    detalle['impacto_evento'] = float(impacto_evento)
+    detalle['metodo'] = metodo
+    return detalle
+
 def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict):
     base_year = fecha_actual.year - 1
     fecha_base_exacta = fecha_actual.replace(year=base_year)
@@ -1626,6 +1680,19 @@ cargar_datos_persistentes()
 # =============================================================================
 # INTERFAZ DE USUARIO (Streamlit)
 # =============================================================================
+
+# -- Debug: herramienta para comprobar comportamiento de eventos/vísperas
+if st.session_state.get('autenticado', False):
+    try:
+        if st.sidebar.checkbox('Modo debug: eventos', key='debug_eventos'):
+            with st.expander('Debug: Eventos y Vísperas', expanded=True):
+                fecha_test = st.date_input('Fecha a comprobar', datetime.now().date(), key='debug_fecha')
+                if st.button('Calcular impacto', key='debug_btn_calcular'):
+                    detalle = calcular_impacto_evento_para_fecha(fecha_test, st.session_state.get('df_historico', pd.DataFrame()), st.session_state.get('eventos', {}))
+                    st.write('Resultado de comprobación:')
+                    st.json(detalle)
+    except Exception:
+        pass
 
 st.sidebar.title("📈 Optimización de Ventas")
 st.sidebar.markdown("Herramienta para predecir ventas y optimizar costes de personal.")
