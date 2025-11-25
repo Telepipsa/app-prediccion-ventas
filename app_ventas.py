@@ -569,12 +569,10 @@ def es_evento_manual(fecha_dt, eventos_dict):
 
 def es_vispera_de_festivo(fecha_dt):
     siguiente = fecha_dt + timedelta(days=1)
-    # Comprueba tanto festivos automáticos como eventos manuales en la siguiente fecha
-    if es_festivo(siguiente):
-        return True
+    # Sólo consideramos festivos automáticos como motivo de 'víspera'.
+    # Los eventos añadidos manualmente NO deben contar como festivos para la lógica de vísperas.
     try:
-        eventos = st.session_state.get('eventos', {})
-        return es_evento_manual(siguiente, eventos)
+        return es_festivo(siguiente)
     except Exception:
         return False
 
