@@ -1281,7 +1281,6 @@ def optimizar_coste_personal(df_prediccion):
             ventas = ventas_estimadas[i]
             h_aux = max(0.0, horas_aux_vals[i] if horas_aux_vals[i] is not None else 0.0)
             h_rep = max(0.0, horas_rep_vals[i] if horas_rep_vals[i] is not None else 0.0)
-            extra_viernes = ""
             if i == 4:
                 h_rep += 6.0
             h_aux = redondear_025(h_aux); h_rep = redondear_025(h_rep)
@@ -1300,7 +1299,7 @@ def optimizar_coste_personal(df_prediccion):
                 '% Coste Total s/ Ventas': pct_coste_total,
                 '% Coste Auxiliares s/ Ventas': pct_coste_aux,
                 '% Coste Repartidores s/ Ventas': pct_coste_rep,
-                'Extra viernes': extra_viernes
+                
             })
         return pd.DataFrame(resultados)
     if status == 'Optimal':
@@ -1345,7 +1344,6 @@ def optimizar_coste_personal(df_prediccion):
             ventas = temp_dict['Ventas Estimadas']
             h_aux = temp_dict['coste_aux'] / COSTO_HORA_PERSONAL
             h_rep = temp_dict['coste_rep'] / COSTO_HORA_PERSONAL
-            extra_viernes = ""
             if temp_dict['Día'] == 'Viernes':
                 h_rep += 6.0
             h_aux = redondear_025(h_aux); h_rep = redondear_025(h_rep)
@@ -1364,7 +1362,7 @@ def optimizar_coste_personal(df_prediccion):
                 '% Coste Total s/ Ventas': pct_coste_total,
                 '% Coste Auxiliares s/ Ventas': pct_coste_aux,
                 '% Coste Repartidores s/ Ventas': pct_coste_rep,
-                'Extra viernes': extra_viernes
+                
             })
         df_resultados = pd.DataFrame(resultados)
         return df_resultados, "Heuristic"
