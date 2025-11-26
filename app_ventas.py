@@ -602,8 +602,15 @@ def calcular_impacto_evento_para_fecha(fecha_actual, df_historico, eventos):
     if is_evento_manual:
         evento_data = eventos.get(fecha_str, {})
         detalle['descripcion'] = evento_data.get('descripcion')
-        # Si la fecha existe en histórico, calcular ratio frente a la semana anterior
-        if fecha_ts in df_historico.index:
+        # Preferir impacto manual si está presente (debe prevalecer sobre ratios históricas)
+        if isinstance(evento_data, dict) and 'impacto_manual_pct' in evento_data:
+            try:
+                impacto_evento = 1.0 + (float(evento_data.get('impacto_manual_pct', 0)) / 100.0)
+                metodo = 'manual_pct'
+            except Exception:
+                pass
+        # Si no hay ajuste manual y la fecha existe en histórico, calcular ratio frente a la semana anterior
+        if metodo is None and fecha_ts in df_historico.index:
             fecha_anterior = fecha_ts - timedelta(days=7)
             detalle['fecha_anterior'] = fecha_anterior.strftime('%Y-%m-%d')
             if fecha_anterior in df_historico.index:
@@ -614,13 +621,6 @@ def calcular_impacto_evento_para_fecha(fecha_actual, df_historico, eventos):
                 if ventas_anterior > 0:
                     impacto_evento = ventas_dia / ventas_anterior
                     metodo = 'historical_week_ratio'
-        # Si se proporcionó un ajuste manual, aplicar
-        if metodo is None and isinstance(evento_data, dict) and 'impacto_manual_pct' in evento_data:
-            try:
-                impacto_evento = 1.0 + (float(evento_data.get('impacto_manual_pct', 0)) / 100.0)
-                metodo = 'manual_pct'
-            except Exception:
-                pass
     elif is_festivo_auto:
         metodo = 'festivo_auto'
     else:
@@ -820,6 +820,13 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         wom = week_of_month_custom(fecha_actual)
         decay_factor = decay_factors.get(wom, 1.0)
         prediccion_base = prediccion_base_ajustada * decay_factor
+        # Guardar la predicción base 'normal' antes de cualquier recalculo
+        # específico de eventos. Si existe un `impacto_manual_pct` declaradoo
+        # queremos aplicar ese % sobre esta `original_prediccion_base`.
+        try:
+            original_prediccion_base = float(prediccion_base)
+        except Exception:
+            original_prediccion_base = prediccion_base
 
         impacto_evento = 1.0
         tipo_evento = "Día Normal"
@@ -828,17 +835,23 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         if fecha_str in eventos:
             evento_data = eventos[fecha_str]
             tipo_evento = evento_data.get('descripcion', 'Evento')
-            if fecha_actual_ts in df_historico.index:
-                fecha_anterior = fecha_actual - timedelta(days=7)
-                if fecha_anterior in df_historico.index:
-                    ventas_anterior = df_historico.loc[fecha_anterior, 'ventas']
-                    ventas_dia = df_historico.loc[fecha_actual_ts, 'ventas']
-                    if ventas_anterior > 0:
-                        impacto_evento = ventas_dia / ventas_anterior
-                        tipo_evento += " (Impacto Histórico)"
-            elif 'impacto_manual_pct' in evento_data:
-                impacto_evento = 1 + (evento_data['impacto_manual_pct'] / 100)
-                tipo_evento += " (Manual)"
+            # Preferir impacto manual si está declarado en el evento (debe prevalecer)
+            if isinstance(evento_data, dict) and 'impacto_manual_pct' in evento_data:
+                try:
+                    impacto_evento = 1 + (evento_data['impacto_manual_pct'] / 100)
+                    tipo_evento += " (Manual)"
+                except Exception:
+                    pass
+            else:
+                # Si no hay ajuste manual, usar ratio histórico si existe
+                if fecha_actual_ts in df_historico.index:
+                    fecha_anterior = fecha_actual - timedelta(days=7)
+                    if fecha_anterior in df_historico.index:
+                        ventas_anterior = df_historico.loc[fecha_anterior, 'ventas']
+                        ventas_dia = df_historico.loc[fecha_actual_ts, 'ventas']
+                        if ventas_anterior > 0:
+                            impacto_evento = ventas_dia / ventas_anterior
+                            tipo_evento += " (Impacto Histórico)"
         elif fecha_actual in festivos_es:
             tipo_evento = "Festivo (Auto)"
 
@@ -1131,6 +1144,16 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             wom_extra = week_of_month_custom(fecha_actual)
             if wom_extra == 1:
                 prediccion_base = prediccion_base * 1.01
+        except Exception:
+            pass
+
+        # Si hay un evento manual con `impacto_manual_pct`, forzamos que el
+        # multiplicador se aplique sobre la predicción base original (día normal),
+        # en lugar de sobre una base recalculada por la rama de evento.
+        try:
+            evento_data_local = eventos.get(fecha_str, {}) if isinstance(eventos, dict) else {}
+            if is_evento_manual and isinstance(evento_data_local, dict) and 'impacto_manual_pct' in evento_data_local:
+                prediccion_base = original_prediccion_base
         except Exception:
             pass
 
@@ -2355,7 +2378,8 @@ if display_results:
                                         except Exception:
                                             return ''
                                         return 'color: green' if v > 0 else ('color: red' if v < 0 else '')
-                                    sty = sty.applymap(lambda v: 'color: green' if (isinstance(v, (int, float)) and v > 0) else ('color: red' if (isinstance(v, (int, float)) and v < 0) else ''), subset=['pct_change'])
+                                    # `Styler.applymap` está deprecado; usar `Styler.map` en su lugar
+                                    sty = sty.map(lambda v: 'color: green' if (isinstance(v, (int, float)) and v > 0) else ('color: red' if (isinstance(v, (int, float)) and v < 0) else ''), subset=['pct_change'])
                                     st.dataframe(sty, width='stretch')
                                 except Exception:
                                     # Fallback: format as strings and show without extra styling
