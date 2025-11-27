@@ -1325,27 +1325,10 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         
         factor_tendencia = calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8)
         media_ajustada_tendencia = media_reciente_current * factor_tendencia
+        # Calculamos ambas versiones de mezcla: con y sin ajuste YTD.
         ventas_base_ajustada_ytd = ventas_base * ytd_factor
-        # Ajuste de mezcla: 30% base histórica (año anterior ajustado) + 70% media reciente ajustada
-        prediccion_base_ajustada = (ventas_base_ajustada_ytd * 0.3) + (media_ajustada_tendencia * 0.7)
-        # guardar debug intermedio
-        pred_before_decay = float(prediccion_base_ajustada)
-        
-        wom = week_of_month_custom(fecha_actual)
-        decay_factor = decay_factors.get(wom, 1.0)
-        prediccion_base = prediccion_base_ajustada * decay_factor
-        # guardar predicción antes de clipping para auditoría
-        try:
-            pred_before_clipping = float(prediccion_base)
-        except Exception:
-            pred_before_clipping = None
-        # Guardar la predicción base 'normal' antes de cualquier recalculo
-        # específico de eventos. Si existe un `impacto_manual_pct` declaradoo
-        # queremos aplicar ese % sobre esta `original_prediccion_base`.
-        try:
-            original_prediccion_base = float(prediccion_base)
-        except Exception:
-            original_prediccion_base = prediccion_base
+        pred_mix_with_ytd = (ventas_base_ajustada_ytd * 0.3) + (media_ajustada_tendencia * 0.7)
+        pred_mix_no_ytd = (ventas_base * 0.3) + (media_ajustada_tendencia * 0.7)
 
         impacto_evento = 1.0
         tipo_evento = "Día Normal"
@@ -1378,6 +1361,40 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         is_evento_manual = (fecha_str in eventos)
         is_festivo_auto = (fecha_actual in festivos_es)
         is_vispera = es_vispera_de_festivo(fecha_actual)
+
+        # Seleccionar la mezcla apropiada:
+        # - Para festivos, eventos manuales o vísperas mantenemos la mezcla que aplica YTD
+        # - Para días normales NO aplicamos el ajuste YTD (está reflejado en la media reciente y la base),
+        #   sólo aplicamos el factor por posición en el mes (decay_factor) posteriormente.
+        try:
+            if is_evento_manual or is_festivo_auto or is_vispera:
+                prediccion_base_ajustada = float(pred_mix_with_ytd)
+            else:
+                prediccion_base_ajustada = float(pred_mix_no_ytd)
+        except Exception:
+            prediccion_base_ajustada = float(pred_mix_no_ytd)
+
+        # guardar debug intermedio
+        try:
+            pred_before_decay = float(prediccion_base_ajustada)
+        except Exception:
+            pred_before_decay = None
+
+        wom = week_of_month_custom(fecha_actual)
+        decay_factor = decay_factors.get(wom, 1.0)
+        prediccion_base = prediccion_base_ajustada * decay_factor
+        # guardar predicción antes de clipping para auditoría
+        try:
+            pred_before_clipping = float(prediccion_base)
+        except Exception:
+            pred_before_clipping = None
+        # Guardar la predicción base 'normal' antes de cualquier recalculo
+        # específico de eventos. Si existe un `impacto_manual_pct` declarado
+        # queremos aplicar ese % sobre esta `original_prediccion_base`.
+        try:
+            original_prediccion_base = float(prediccion_base)
+        except Exception:
+            original_prediccion_base = prediccion_base
 
         # Inicializar prev_vals para auditoría (últimas ocurrencias usadas en cálculos)
         prev_vals_local = []
