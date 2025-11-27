@@ -723,37 +723,54 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
             pass
 
     if es_festivo(fecha_actual) or es_vispera_de_festivo(fecha_actual):
-        if fecha_base_exacta in df_base.index:
-            return df_base.loc[fecha_base_exacta, 'ventas'], fecha_str_base
-            # Caso: festivo o víspera. Reglas especiales:
-            # - Festivos se comparan preferentemente con festivos del año base.
-            # - Si es víspera y cae en viernes/sábado, buscar viernes/sábado equivalente de la misma semana;
-            #   si el candidato en el año base es a su vez festivo, probar la semana anterior.
-            # - Los domingos serán tratados especialmente en la búsqueda (ver is_domingo mask arriba).
-            mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
-            wom = week_of_month_custom(fecha_actual)
-            df_mes = df_base[df_base.index.month == mes].copy()
+        # Preparamos estructura de festivos del año base
+        try:
             festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+        except Exception:
+            festivos_base = pd.DatetimeIndex([])
 
-            # Helper: safe check for date in df_base
-            def exists_in_df(dt):
-                return dt in df_base.index
+        mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
+        wom = week_of_month_custom(fecha_actual)
+        df_mes = df_base[df_base.index.month == mes].copy()
 
-            # 1) Intentar fecha exacta en el año base
+        # 1) Si es FESTIVO: si cae en viernes/sábado/domingo preferimos comparar
+        # con el mismo festivo del año anterior (mismo nombre en la tabla de festivos),
+        # independientemente del weekday.
+        if es_festivo(fecha_actual):
+            try:
+                # Intentar resolver nombre del festivo actual y buscar mismo festivo en base_year
+                holiday_name = festivos_es.get(fecha_actual) if hasattr(festivos_es, 'get') else None
+            except Exception:
+                holiday_name = None
+
+            if holiday_name:
+                matches = []
+                for d in festivos_es:
+                    try:
+                        if pd.Timestamp(d).year == base_year and festivos_es.get(d) == holiday_name:
+                            matches.append(pd.Timestamp(d))
+                    except Exception:
+                        continue
+                if matches:
+                    matches_idx = pd.DatetimeIndex(matches)
+                    forward = matches_idx[matches_idx >= fecha_base_exacta]
+                    if len(forward) > 0:
+                        chosen_idx = forward[0]
+                    else:
+                        diffs = (matches_idx - fecha_base_exacta).days.abs()
+                        chosen_idx = matches_idx[diffs.argmin()]
+                    if chosen_idx in df_base.index:
+                        return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+
+            # Fallback: si existe la misma fecha (día/mes) en el año base, usarla
             if fecha_base_exacta in df_base.index:
-                # Si fecha actual es festivo, preferimos que la fecha base también sea festivo
-                if es_festivo(fecha_actual):
-                    if fecha_base_exacta in festivos_base:
-                        return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
-                    # si la fecha exacta no es festivo en el año base, seguimos buscando festivos en el mes
-                else:
-                    return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
+                return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_str_base
 
-            # 2) Si es festivo: buscar festivos en el mes que coincidan en weekday
-            if es_festivo(fecha_actual):
-                festivos_en_mes = [d for d in festivos_base if d.month == mes and d.weekday() == dia_semana_num]
+            # Si no encontramos por nombre ni por fecha exacta, intentar buscar festivos
+            # del mismo mes (cerca de la fecha objetivo) y devolver el más cercano.
+            try:
+                festivos_en_mes = [d for d in festivos_base if d.month == mes]
                 if festivos_en_mes:
-                    # elegir el festivo más cercano al objetivo (preferir forward)
                     festivos_idx = pd.DatetimeIndex(festivos_en_mes)
                     forward = festivos_idx[festivos_idx >= fecha_base_exacta]
                     if len(forward) > 0:
@@ -763,120 +780,88 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
                         chosen_idx = festivos_idx[diffs.argmin()]
                     if chosen_idx in df_base.index:
                         return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
-
-            # 3) Regla especial para vísperas FRIDAY: comparar con el viernes del año anterior
-            #    Si ese viernes en el año base es festivo, retroceder una semana (viernes anterior) hasta encontrar uno no-festivo.
-            if es_vispera_de_festivo(fecha_actual) and dia_semana_num == 4:
-                # preferir la fecha exacta reemplazada al año base (mismo día/mes)
-                try:
-                    if fecha_base_exacta in df_base.index and fecha_base_exacta not in festivos_base:
-                        return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
-                    # si en el año base ese viernes es festivo (o no existe), buscar el viernes de la semana anterior no festivo
-                    alt = fecha_base_exacta - timedelta(days=7)
-                    attempts = 0
-                    while attempts < 4:
-                        if alt in df_base.index and alt.weekday() == 4 and alt not in festivos_base:
-                            return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
-                        alt = alt - timedelta(days=7)
-                        attempts += 1
-                except Exception:
-                    pass
-            # 3b) Si es víspera y cae en viernes/sábado, buscar equivalente viernes/sábado de la misma semana;
-            #    si el candidato en el año base resulta ser festivo, probar la semana anterior.
-            if es_vispera_de_festivo(fecha_actual) and dia_semana_num in (4, 5):
-                # buscar candidatos en el mismo mes y weekday
-                candidates = df_mes[df_mes.index.weekday == dia_semana_num].copy()
-                if not candidates.empty:
-                    wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
-                    same_wom = candidates[wom_series == wom]
-                    if not same_wom.empty:
-                        chosen_idx = same_wom.index[-1]
-                        # si el elegido en el año base es festivo, intentar candidato una semana antes
-                        if chosen_idx in festivos_base:
-                            alt = chosen_idx - timedelta(days=7)
-                            if alt in df_base.index and alt not in festivos_base:
-                                return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
-                            # si la semana anterior también es festiva o no existe, mantenemos chosen_idx
-                        if chosen_idx in df_base.index:
-                            return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
-
-                # ventana +/-7 días: preferir same weekday and avoid festivos as primary, else try previous week
-                try:
-                    ventana_start = fecha_base_exacta - timedelta(days=7)
-                    ventana_end = fecha_base_exacta + timedelta(days=7)
-                    df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
-                    window_cands = df_window[df_window.index.weekday == dia_semana_num]
-                    if not window_cands.empty:
-                        # prefer same wom candidates
-                        wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
-                        same_wom_window = window_cands[wom_window == wom]
-                        if not same_wom_window.empty:
-                            idxs = same_wom_window.index
-                            forward = idxs[idxs >= fecha_base_exacta]
-                            if len(forward) > 0:
-                                chosen_idx = forward[0]
-                            else:
-                                diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
-                                chosen_idx = diffs.idxmin()
-                            # if chosen is festivo, try previous week
-                            if chosen_idx in festivos_base:
-                                alt = chosen_idx - timedelta(days=7)
-                                if alt in df_base.index and alt not in festivos_base:
-                                    return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
-                            return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
-                except Exception:
-                    pass
-
-            # 4) Fallback general para festivos/vísperas: intentar misma week-of-month evitando festivos (salvo domingos)
-            if is_domingo:
-                mask_no_festivo = pd.Series(True, index=df_mes.index)
-                mask_no_event = pd.Series(True, index=df_mes.index)
-            else:
-                mask_no_festivo = ~df_mes.index.isin(festivos_base)
-                mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_mes.index)
-            df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
-            candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
-            if not candidates.empty:
-                wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
-                same_wom = candidates[wom_series == wom]
-                if not same_wom.empty:
-                    chosen_idx = same_wom.index[-1]
-                    return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
-            # ventana +/-7 días
-            try:
-                ventana_start = fecha_base_exacta - timedelta(days=7)
-                ventana_end = fecha_base_exacta + timedelta(days=7)
-                df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
-                if is_domingo:
-                    mask_no_f = pd.Series(True, index=df_window.index)
-                    mask_no_e = pd.Series(True, index=df_window.index)
-                else:
-                    mask_no_f = ~df_window.index.isin(festivos_base)
-                    mask_no_e = ~df_window.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_window.index)
-                df_window_sano = df_window[mask_no_f & mask_no_e]
-                window_cands = df_window_sano[df_window_sano.index.weekday == dia_semana_num]
-                if not window_cands.empty:
-                    wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
-                    same_wom_window = window_cands[wom_window == wom]
-                    if not same_wom_window.empty:
-                        idxs = same_wom_window.index
-                        forward = idxs[idxs >= fecha_base_exacta]
-                        if len(forward) > 0:
-                            diffs_forward = (forward - fecha_base_exacta).days
-                            chosen_idx = forward[diffs_forward.argmin()]
-                        else:
-                            diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
-                            chosen_idx = diffs.idxmin()
-                        return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
             except Exception:
                 pass
-            # Fallback final: media por weekday en el mes
-            series_weekday = df_mes[df_mes.index.weekday == dia_semana_num]['ventas']
-            if not series_weekday.empty:
-                chosen_idx = series_weekday.index[-1]
-                return float(series_weekday.iloc[-1]), chosen_idx.strftime('%Y-%m-%d')
-            ventas_base = series_weekday.mean() if not series_weekday.empty else np.nan
-            return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
+
+        # 2) Si es VÍSPERA: para vísperas que caen en viernes/sábado/domingo
+        # buscamos el mismo weekday en el año anterior que NO sea festivo; si el candidato
+        # está marcado como festivo, retroceder una semana hasta encontrar un weekday no-festivo.
+        if es_vispera_de_festivo(fecha_actual) and dia_semana_num in (4, 5, 6):
+            try:
+                target_wd = dia_semana_num
+                # Empezar por la misma fecha (día/mes) en el año base
+                candidate = fecha_base_exacta
+                attempts = 0
+                while attempts < 8:
+                    if candidate in df_base.index and candidate.weekday() == target_wd:
+                        # si no es festivo en el año base y no es evento (si exclude_eventos), lo usamos
+                        is_candidate_fest = candidate in festivos_base
+                        candidate_str = candidate.strftime('%Y-%m-%d')
+                        is_candidate_event = (candidate_str in eventos_dict) if eventos_dict else False
+                        if (not is_candidate_fest) and (exclude_eventos and not is_candidate_event or not exclude_eventos):
+                            return float(df_base.loc[candidate, 'ventas']), candidate.strftime('%Y-%m-%d')
+                    # retroceder una semana (mismo weekday anterior)
+                    candidate = candidate - timedelta(days=7)
+                    attempts += 1
+            except Exception:
+                pass
+
+        # 3) Si no se resolvió con las reglas anteriores, caer en la lógica genérica
+        # existente: intentar fecha exacta, same-week-of-month evitando festivos, ventana +/-7d, etc.
+        # Intentar fecha exacta primero (no necesariamente festivo en el base year)
+        if fecha_base_exacta in df_base.index:
+            return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_str_base
+
+        # Mantener resto de heurísticas previas: buscar en el mes por same weekday evitando festivos/eventos
+        if is_domingo:
+            mask_no_festivo = pd.Series(True, index=df_mes.index)
+            mask_no_event = pd.Series(True, index=df_mes.index)
+        else:
+            mask_no_festivo = ~df_mes.index.isin(festivos_base)
+            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_mes.index)
+        df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
+        candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
+        if not candidates.empty:
+            wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
+            same_wom = candidates[wom_series == wom]
+            if not same_wom.empty:
+                chosen_idx = same_wom.index[-1]
+                return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+        # ventana +/-7 días
+        try:
+            ventana_start = fecha_base_exacta - timedelta(days=7)
+            ventana_end = fecha_base_exacta + timedelta(days=7)
+            df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
+            if is_domingo:
+                mask_no_f = pd.Series(True, index=df_window.index)
+                mask_no_e = pd.Series(True, index=df_window.index)
+            else:
+                mask_no_f = ~df_window.index.isin(festivos_base)
+                mask_no_e = ~df_window.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_window.index)
+            df_window_sano = df_window[mask_no_f & mask_no_e]
+            window_cands = df_window_sano[df_window_sano.index.weekday == dia_semana_num]
+            if not window_cands.empty:
+                wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
+                same_wom_window = window_cands[wom_window == wom]
+                if not same_wom_window.empty:
+                    idxs = same_wom_window.index
+                    forward = idxs[idxs >= fecha_base_exacta]
+                    if len(forward) > 0:
+                        diffs_forward = (forward - fecha_base_exacta).days
+                        chosen_idx = forward[diffs_forward.argmin()]
+                    else:
+                        diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
+                        chosen_idx = diffs.idxmin()
+                    return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+        # Fallback final: media por weekday en el mes
+        series_weekday = df_mes[df_mes.index.weekday == dia_semana_num]['ventas']
+        if not series_weekday.empty:
+            chosen_idx = series_weekday.index[-1]
+            return float(series_weekday.iloc[-1]), chosen_idx.strftime('%Y-%m-%d')
+        ventas_base = series_weekday.mean() if not series_weekday.empty else np.nan
+        return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
 
     # Para días normales, preferimos la misma week-of-month en el año base
     mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
@@ -1086,6 +1071,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         fecha_base_historica = None
         ventas_base_historica = None
         selected_rule = None
+        # valores usados explícitamente en la fórmula (para auditoría)
+        base_val_usada = None
+        month_factor = 1.0
         # Si la fecha actual es un evento manual, incluir también fechas marcadas como "evento"
         # en la búsqueda de la base histórica (no excluir eventos manuales del histórico base)
         is_evento_manual = (fecha_str in eventos)
@@ -1436,6 +1424,54 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 else:
                     prediccion_base = ventas_base * ytd_factor
 
+            # Si es FESTIVO, forzamos usar 100% de la venta histórica y aplicar
+            # el ajuste anual (YTD) y el ajuste del mes concreto (month over month).
+            # Esto sustituye la mezcla previa para festivos solicitada por el usuario.
+            if es_festivo(fecha_actual):
+                # Para festivos usamos el 100% de la venta histórica y aplicamos
+                # solo el ajuste anual para viernes/sábado/domingo; para el resto
+                # de weekdays aplicamos además el factor del mes.
+                try:
+                    mes = fecha_actual.month
+                    try:
+                        base_val = ventas_base_historica if ('ventas_base_historica' in locals() and ventas_base_historica is not None) else (base_exact_val if 'base_exact_val' in locals() and base_exact_val is not None else ventas_base)
+                    except Exception:
+                        base_val = ventas_base
+
+                    dia_sem = fecha_actual.weekday()
+                    if dia_sem in (4, 5, 6):
+                        # Viernes, Sábado o Domingo: NO aplicar month_factor
+                        month_factor = 1.0
+                    else:
+                        # Calcular factor del mes: comparativa entre el mes actual hasta la fecha y el mismo rango en el año base
+                        try:
+                            fecha_base_exacta_local = fecha_actual.replace(year=BASE_YEAR)
+                        except Exception:
+                            fecha_base_exacta_local = None
+                        try:
+                            sum_current = df_historico[(df_historico.index.year == CURRENT_YEAR) & (df_historico.index.month == mes) & (df_historico.index <= fecha_actual)]['ventas'].sum()
+                            sum_base_month = 0.0
+                            if fecha_base_exacta_local is not None:
+                                sum_base_month = df_historico[(df_historico.index.year == BASE_YEAR) & (df_historico.index.month == mes) & (df_historico.index <= fecha_base_exacta_local)]['ventas'].sum()
+                            month_factor = float(sum_current / sum_base_month) if (sum_base_month and sum_base_month > 0) else 1.0
+                            month_factor = float(np.clip(month_factor, 0.7, 1.3))
+                        except Exception:
+                            month_factor = 1.0
+
+                    prediccion_base = float(max(0.0, (base_val if base_val is not None else 0.0) * ytd_factor * month_factor))
+                    # almacenar para auditoría
+                    try:
+                        base_val_usada = float(base_val if base_val is not None else 0.0)
+                    except Exception:
+                        base_val_usada = None
+                    try:
+                        prev_vals_local = []
+                    except Exception:
+                        prev_vals_local = []
+                except Exception:
+                    # Si algo falla, dejar la predicción calculada previamente
+                    pass
+
             prediccion_final = prediccion_base * impacto_evento
             # Mantener tipo_evento conciso (ya establecido arriba)
         # Víspera: mezclar la comparación exacta del año anterior con la predicción base
@@ -1760,6 +1796,8 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             'ytd_factor': ytd_factor,
             'ventas_base_ajustada_ytd': ventas_base_ajustada_ytd,
             'media_ajustada_tendencia': media_ajustada_tendencia,
+            'base_val_usada': base_val_usada if 'base_val_usada' in locals() else None,
+            'month_factor': month_factor if 'month_factor' in locals() else 1.0,
             'pred_before_decay': pred_before_decay if 'pred_before_decay' in locals() else None,
             'pred_before_clipping': pred_before_clipping if 'pred_before_clipping' in locals() else None,
             'pred_before_fcb': pred_before_fcb if 'pred_before_fcb' in locals() else None,
@@ -2961,7 +2999,7 @@ if display_results:
     # --- Nueva tabla: detalles de la Base Histórica usada por fila ---
     try:
         # Construir DataFrame que mapea cada fila de la predicción a su fecha base exacta
-        df_base_details = df_prediccion.reset_index()[['dia_semana', 'fecha', 'fecha_base_historica', 'ventas_base_historica']].copy()
+        df_base_details = df_prediccion.reset_index()[['dia_semana', 'fecha', 'fecha_base_historica', 'ventas_base_historica', 'base_val_usada', 'ytd_factor', 'month_factor', 'prediccion_pura', 'decay_factor', 'impacto_evento', 'ventas_predichas']].copy()
         # Formatear columnas: fecha base, día de la semana y ventas históricas
         def fmt_base_date(x):
             try:
@@ -2993,6 +3031,15 @@ if display_results:
         df_base_details['Fecha Base (Año Anterior)'] = df_base_details['fecha_base_historica'].apply(fmt_base_date)
         df_base_details['Día Base'] = df_base_details['fecha_base_historica'].apply(weekday_name)
         df_base_details['Ventas Base (€)'] = df_base_details['ventas_base_historica'].apply(fmt_sales)
+        # Mostrar la base usada en la fórmula (puede ser la venta histórica seleccionada o media)
+        df_base_details['Base Usada (€)'] = df_base_details['base_val_usada'].apply(fmt_sales)
+        # Factores aplicados
+        df_base_details['YTD Factor'] = df_base_details['ytd_factor'].apply(lambda x: f"{float(x):.3f}" if not pd.isna(x) else PLACEHOLDER_STR)
+        df_base_details['Month Factor'] = df_base_details['month_factor'].apply(lambda x: f"{float(x):.3f}" if not pd.isna(x) else PLACEHOLDER_STR)
+        df_base_details['Predicción Base (€)'] = df_base_details['prediccion_pura'].apply(fmt_sales)
+        df_base_details['Decay Factor'] = df_base_details['decay_factor'].apply(lambda x: f"{float(x):.3f}" if not pd.isna(x) else PLACEHOLDER_STR)
+        df_base_details['Impacto Evento'] = df_base_details['impacto_evento'].apply(lambda x: f"{float(x):.3f}" if not pd.isna(x) else PLACEHOLDER_STR)
+        df_base_details['Predicción Final (€)'] = df_base_details['ventas_predichas'].apply(fmt_sales)
         # Añadir columnas de evento y partido FCB (mostrar descripción si existe)
         eventos_mask = st.session_state.get('eventos', {})
         fcb_mask = st.session_state.get('fcb_matches', {})
@@ -3033,16 +3080,13 @@ if display_results:
         df_base_details['Hubo Evento'] = df_base_details['fecha_base_historica'].apply(evt_desc)
         df_base_details['Hubo Partido FCB'] = df_base_details['fecha_base_historica'].apply(fcb_desc)
         # Si ambas columnas no contienen información útil (todas filas vacías), no las mostramos
-        if df_base_details['Hubo Evento'].eq(PLACEHOLDER_STR).all() and df_base_details['Hubo Partido FCB'].eq(PLACEHOLDER_STR).all():
-            df_base_details = df_base_details[['dia_semana', 'Fecha Base (Año Anterior)', 'Día Base', 'Ventas Base (€)']]
-        else:
-            # construir orden final incluyendo solo las columnas necesarias
-            cols_final = ['dia_semana', 'Fecha Base (Año Anterior)', 'Día Base', 'Ventas Base (€)']
-            if not df_base_details['Hubo Evento'].eq(PLACEHOLDER_STR).all():
-                cols_final.append('Hubo Evento')
-            if not df_base_details['Hubo Partido FCB'].eq(PLACEHOLDER_STR).all():
-                cols_final.append('Hubo Partido FCB')
-            df_base_details = df_base_details[cols_final]
+        # Construir orden final de columnas para mostrar (omitimos las col vacías si procede)
+        cols_final = ['dia_semana', 'Fecha Base (Año Anterior)', 'Día Base', 'Ventas Base (€)', 'Base Usada (€)', 'YTD Factor', 'Month Factor', 'Predicción Base (€)', 'Decay Factor', 'Impacto Evento', 'Predicción Final (€)']
+        if not df_base_details['Hubo Evento'].eq(PLACEHOLDER_STR).all():
+            cols_final.append('Hubo Evento')
+        if not df_base_details['Hubo Partido FCB'].eq(PLACEHOLDER_STR).all():
+            cols_final.append('Hubo Partido FCB')
+        df_base_details = df_base_details[cols_final]
         df_base_details = df_base_details.set_index('dia_semana')
         st.subheader('2. Detalle: Origen de la Base Histórica (año anterior)')
         st.markdown("""<ul>
