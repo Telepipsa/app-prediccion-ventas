@@ -32,6 +32,7 @@ import numpy as np  # Añadido para cálculos de tendencia
 import urllib.parse
 import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25 
 import re
+import unicodedata
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -274,6 +275,26 @@ def week_of_month_custom(fecha_or_day):
     if d >= 8:
         return 2
     return 1
+
+
+def _normalize_text_for_compare(s):
+    """Normaliza una cadena para comparaciones: bajar a minúsculas, quitar acentos/diacríticos y caracteres no alfanuméricos.
+    Sustituye el caracter de reemplazo '�' por 'o' para mitigar problemas de encoding en algunos entornos.
+    """
+    try:
+        if s is None:
+            return ''
+        s = str(s)
+        s = s.replace('�', 'o')
+        s = unicodedata.normalize('NFKD', s)
+        s = ''.join([c for c in s if not unicodedata.combining(c)])
+        s = re.sub(r'[^0-9A-Za-z\s]', '', s)
+        return s.strip().lower()
+    except Exception:
+        try:
+            return str(s).strip().lower()
+        except Exception:
+            return ''
 
 # Límites base de coste de personal (% de ventas estimadas)
 LIMITES_COSTE_BASE = {
@@ -737,20 +758,63 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
         # con el mismo festivo del año anterior (mismo nombre en la tabla de festivos),
         # independientemente del weekday.
         if es_festivo(fecha_actual):
+            # Prioridad: usar la misma fecha (día/mes) en el año base si existe en el histórico
             try:
-                # Intentar resolver nombre del festivo actual y buscar mismo festivo en base_year
-                holiday_name = festivos_es.get(fecha_actual) if hasattr(festivos_es, 'get') else None
+                fecha_base_exacta_immediate = fecha_actual.replace(year=base_year)
+                if pd.Timestamp(fecha_base_exacta_immediate) in df_base.index:
+                    return float(df_base.loc[pd.Timestamp(fecha_base_exacta_immediate), 'ventas']), fecha_base_exacta_immediate.strftime('%Y-%m-%d')
+            except Exception:
+                pass
+
+            # Intentar resolver nombre del festivo actual y buscar el mismo festivo en el año base
+            try:
+                holiday_name = None
+                try:
+                    holiday_name = festivos_es.get(fecha_actual)
+                except Exception:
+                    pass
+                if holiday_name is None:
+                    try:
+                        holiday_name = festivos_es.get(fecha_actual.date())
+                    except Exception:
+                        holiday_name = None
+                if holiday_name is None and hasattr(pd, 'Timestamp'):
+                    try:
+                        holiday_name = festivos_es.get(pd.Timestamp(fecha_actual).date())
+                    except Exception:
+                        holiday_name = None
             except Exception:
                 holiday_name = None
 
             if holiday_name:
                 matches = []
-                for d in festivos_es:
+                try:
+                    holiday_name_norm = _normalize_text_for_compare(holiday_name)
+                    for d, name in getattr(festivos_es, 'items')():
+                        try:
+                            if d.year != base_year:
+                                continue
+                            name_norm = _normalize_text_for_compare(name)
+                            if name_norm and holiday_name_norm and name_norm == holiday_name_norm:
+                                matches.append(pd.Timestamp(d))
+                        except Exception:
+                            continue
+                except Exception:
                     try:
-                        if pd.Timestamp(d).year == base_year and festivos_es.get(d) == holiday_name:
-                            matches.append(pd.Timestamp(d))
+                        holiday_name_norm = _normalize_text_for_compare(holiday_name)
+                        for d in festivos_es:
+                            try:
+                                if pd.Timestamp(d).year != base_year:
+                                    continue
+                                name = festivos_es.get(d)
+                                name_norm = _normalize_text_for_compare(name)
+                                if name_norm and holiday_name_norm and name_norm == holiday_name_norm:
+                                    matches.append(pd.Timestamp(d))
+                            except Exception:
+                                continue
                     except Exception:
-                        continue
+                        matches = []
+
                 if matches:
                     matches_idx = pd.DatetimeIndex(matches)
                     forward = matches_idx[matches_idx >= fecha_base_exacta]
@@ -762,12 +826,7 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
                     if chosen_idx in df_base.index:
                         return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
 
-            # Fallback: si existe la misma fecha (día/mes) en el año base, usarla
-            if fecha_base_exacta in df_base.index:
-                return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_str_base
-
-            # Si no encontramos por nombre ni por fecha exacta, intentar buscar festivos
-            # del mismo mes (cerca de la fecha objetivo) y devolver el más cercano.
+            # Buscar festivos en el año base preferentemente (por mes o cercano)
             try:
                 festivos_en_mes = [d for d in festivos_base if d.month == mes]
                 if festivos_en_mes:
@@ -778,6 +837,16 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
                     else:
                         diffs = (festivos_idx - fecha_base_exacta).days.abs()
                         chosen_idx = festivos_idx[diffs.argmin()]
+                    if chosen_idx in df_base.index:
+                        return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+                if len(festivos_base) > 0:
+                    festivos_idx_all = pd.DatetimeIndex(festivos_base)
+                    forward_all = festivos_idx_all[festivos_idx_all >= fecha_base_exacta]
+                    if len(forward_all) > 0:
+                        chosen_idx = forward_all[0]
+                    else:
+                        diffs_all = (festivos_idx_all - fecha_base_exacta).days.abs()
+                        chosen_idx = festivos_idx_all[diffs_all.argmin()]
                     if chosen_idx in df_base.index:
                         return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
             except Exception:
@@ -809,8 +878,14 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
         # 3) Si no se resolvió con las reglas anteriores, caer en la lógica genérica
         # existente: intentar fecha exacta, same-week-of-month evitando festivos, ventana +/-7d, etc.
         # Intentar fecha exacta primero (no necesariamente festivo en el base year)
-        if fecha_base_exacta in df_base.index:
-            return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_str_base
+        # Si la fecha exacta existe en el histórico del año base y no hemos
+        # encontrado un festivo equivalente, sólo devolverla si es festivo allí;
+        # si no es festivo, preferimos seguir buscando candidatos festivos.
+        try:
+            if fecha_base_exacta in df_base.index and fecha_base_exacta in festivos_base:
+                return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_str_base
+        except Exception:
+            pass
 
         # Mantener resto de heurísticas previas: buscar en el mes por same weekday evitando festivos/eventos
         if is_domingo:
@@ -1020,6 +1095,15 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         try:
             for j in range(7):
                 target_date = fecha_inicio_semana + timedelta(days=j)
+                # Si el día objetivo es festivo en el año objetivo, no generamos
+                # un `base_week_start` por semana: queremos que los festivos usen
+                # la comparación directa por día/mes en el año base.
+                try:
+                    if es_festivo(target_date):
+                        base_week_starts[j] = None
+                        continue
+                except Exception:
+                    pass
                 target_wom = week_of_month_custom(target_date)
                 target_base_year = target_date.year - 1
                 fecha_inicio_base_candidate = target_date.replace(year=target_base_year)
@@ -1438,25 +1522,10 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     except Exception:
                         base_val = ventas_base
 
-                    dia_sem = fecha_actual.weekday()
-                    if dia_sem in (4, 5, 6):
-                        # Viernes, Sábado o Domingo: NO aplicar month_factor
-                        month_factor = 1.0
-                    else:
-                        # Calcular factor del mes: comparativa entre el mes actual hasta la fecha y el mismo rango en el año base
-                        try:
-                            fecha_base_exacta_local = fecha_actual.replace(year=BASE_YEAR)
-                        except Exception:
-                            fecha_base_exacta_local = None
-                        try:
-                            sum_current = df_historico[(df_historico.index.year == CURRENT_YEAR) & (df_historico.index.month == mes) & (df_historico.index <= fecha_actual)]['ventas'].sum()
-                            sum_base_month = 0.0
-                            if fecha_base_exacta_local is not None:
-                                sum_base_month = df_historico[(df_historico.index.year == BASE_YEAR) & (df_historico.index.month == mes) & (df_historico.index <= fecha_base_exacta_local)]['ventas'].sum()
-                            month_factor = float(sum_current / sum_base_month) if (sum_base_month and sum_base_month > 0) else 1.0
-                            month_factor = float(np.clip(month_factor, 0.7, 1.3))
-                        except Exception:
-                            month_factor = 1.0
+                    # Para festivos aplicamos exclusivamente la venta histórica ajustada
+                    # por el factor anual YTD. No aplicamos un "month factor" para
+                    # festivos (cumple la regla: Mon-Thu usen 100% base histórica + YTD).
+                    month_factor = 1.0
 
                     prediccion_base = float(max(0.0, (base_val if base_val is not None else 0.0) * ytd_factor * month_factor))
                     # almacenar para auditoría
