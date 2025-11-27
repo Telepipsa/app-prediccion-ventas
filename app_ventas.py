@@ -56,55 +56,48 @@ if os.path.exists(dev_no_auth_path):
             pass
         st.session_state.dev_no_auth_msg_shown = True
 
-if not st.session_state.autenticado:
-    st.title("🔐 Acceso restringido")
-    st.markdown("Introduce la contraseña para acceder a la aplicación.")
-
-    # Acceso seguro a secrets: usa get() para evitar KeyError si la clave no existe
+    # --- Preparar validación de token y lectura de secret SIN renderizar UI ---
     try:
         PASSWORD_SECRET = st.secrets.get("PASSWORD", None)
     except Exception:
         PASSWORD_SECRET = None
 
-# Preparar token path y utilidades de validación/escritura de token
-proyecto_dir = os.path.dirname(os.path.abspath(__file__))
-token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
+    proyecto_dir = os.path.dirname(os.path.abspath(__file__))
+    token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
 
-def _validate_auth_token(path, secret, max_age_days=30):
-    try:
-        if not os.path.exists(path):
-            return False
-        with open(path, 'r', encoding='utf-8') as tf:
-            content = tf.read().strip()
-        if ':' not in content:
-            return False
-        ts_str, sig = content.split(':', 1)
-        ts = int(ts_str)
-        if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
-            return False
-        expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, sig)
-    except Exception:
-        return False
-
-def _write_auth_token(path, secret):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        ts = str(int(time.time()))
-        sig = hmac.new(secret.encode('utf-8'), ts.encode('utf-8'), hashlib.sha256).hexdigest()
-        with open(path, 'w', encoding='utf-8') as tf:
-            tf.write(f"{ts}:{sig}")
+    def _validate_auth_token(path, secret, max_age_days=30):
         try:
-            os.chmod(path, 0o600)
+            if not os.path.exists(path):
+                return False
+            with open(path, 'r', encoding='utf-8') as tf:
+                content = tf.read().strip()
+            if ':' not in content:
+                return False
+            ts_str, sig = content.split(':', 1)
+            ts = int(ts_str)
+            if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
+                return False
+            expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, sig)
+        except Exception:
+            return False
+
+    def _write_auth_token(path, secret):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            ts = str(int(time.time()))
+            sig = hmac.new(secret.encode('utf-8'), ts.encode('utf-8'), hashlib.sha256).hexdigest()
+            with open(path, 'w', encoding='utf-8') as tf:
+                tf.write(f"{ts}:{sig}")
+            try:
+                os.chmod(path, 0o600)
+            except Exception:
+                pass
         except Exception:
             pass
-    except Exception:
-        pass
 
-    # Si Streamlit no tiene la clave (a veces no se carga por cwd/permiso),
-    # intentar leer manualmente el archivo .streamlit/secrets.toml del proyecto.
+    # Si no está en st.secrets, intentar leer .streamlit/secrets.toml (fallback)
     if PASSWORD_SECRET is None:
-        proyecto_dir = os.path.dirname(os.path.abspath(__file__))
         secrets_path = os.path.join(proyecto_dir, '.streamlit', 'secrets.toml')
         if os.path.exists(secrets_path):
             try:
@@ -118,42 +111,7 @@ def _write_auth_token(path, secret):
             except Exception:
                 PASSWORD_SECRET = None
 
-        # Path to local auth token used in dev for restoring sessions
-        token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
-
-        def _validate_auth_token(path, secret, max_age_days=30):
-            try:
-                if not os.path.exists(path):
-                    return False
-                with open(path, 'r', encoding='utf-8') as tf:
-                    content = tf.read().strip()
-                if ':' not in content:
-                    return False
-                ts_str, sig = content.split(':', 1)
-                ts = int(ts_str)
-                if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
-                    return False
-                expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
-                return hmac.compare_digest(expected, sig)
-            except Exception:
-                return False
-
-    def _write_auth_token(path, secret):
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            ts = str(int(time.time()))
-            sig = hmac.new(secret.encode('utf-8'), ts.encode('utf-8'), hashlib.sha256).hexdigest()
-            with open(path, 'w', encoding='utf-8') as tf:
-                tf.write(f"{ts}:{sig}")
-            # set restrictive permissions where possible (best-effort)
-            try:
-                os.chmod(path, 0o600)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    # Si hay token válido y tenemos la secret, restaurar sesión automáticamente
+    # Restaurar sesión desde token si procede (hacerlo antes de mostrar cualquier UI)
     if PASSWORD_SECRET and _validate_auth_token(token_path, PASSWORD_SECRET):
         st.session_state.autenticado = True
         if 'auth_restored_msg' not in st.session_state:
@@ -163,55 +121,44 @@ def _write_auth_token(path, secret):
                 pass
             st.session_state.auth_restored_msg = True
 
-    # Si no hay contraseña configurada o está vacía, advertimos y bloqueamos el resto de la app
-    if not PASSWORD_SECRET:
-        st.warning("No se ha encontrado la clave 'PASSWORD' en `st.secrets` ni en `.streamlit/secrets.toml`.")
-        st.info("Para desarrollo local puedes crear un archivo vacío `.streamlit/DEV_NO_AUTH` o configurar `PASSWORD` en `.streamlit/secrets.toml`.")
-        st.stop()
+    # Si tras intentar restaurar la sesión no estamos autenticados, mostrar form
+    if not st.session_state.autenticado:
+        st.title("🔐 Acceso restringido")
+        st.markdown("Introduce la contraseña para acceder a la aplicación.")
 
-    if 'login_attempts' not in st.session_state:
-        st.session_state.login_attempts = 0
+        # Si no hay contraseña configurada, mostrar ayuda y detener
+        if not PASSWORD_SECRET:
+            st.warning("No se ha encontrado la clave 'PASSWORD' en `st.secrets` ni en `.streamlit/secrets.toml`.")
+            st.info("Para desarrollo local puedes crear un archivo vacío `.streamlit/DEV_NO_AUTH` o configurar `PASSWORD` en `.streamlit/secrets.toml`.")
+            st.stop()
 
-    # Usar un form permite que ENTER envíe el formulario además del botón
-    with st.form("login_form"):
-        password_input = st.text_input("Contraseña", type="password", key="__pw_input")
-        submitted = st.form_submit_button('Acceder')
+        if 'login_attempts' not in st.session_state:
+            st.session_state.login_attempts = 0
 
-    if submitted:
-        if password_input and password_input == PASSWORD_SECRET:
-            # Marcar sesión como autenticada y continuar en la misma ejecución.
-            # Marcar sesión como autenticada y forzar un rerun inmediato para
-            # que el bloque de login deje de mostrarse en la misma petición.
-            # Esto permite que al escribir la contraseña y pulsar Enter se
-            # acceda automáticamente al contenido sin pedir recargar manualmente.
-            st.session_state.autenticado = True
-            st.success('Acceso correcto.')
-            try:
-                # Escribir token de persistencia local (siempre que exista una secret válida)
-                if PASSWORD_SECRET:
-                    try:
-                        _write_auth_token(token_path, PASSWORD_SECRET)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                st.experimental_rerun()
-            except Exception:
-                # Si por alguna razón experimental_rerun no está disponible,
-                # continuamos en la misma ejecución (debería seguir funcionando),
-                # pero el rerun es la forma recomendada para ocultar el formulario
-                # inmediatamente tras autenticar.
-                pass
+        with st.form("login_form"):
+            password_input = st.text_input("Contraseña", type="password", key="__pw_input")
+            submitted = st.form_submit_button('Acceder')
+
+        if submitted:
+            if password_input and password_input == PASSWORD_SECRET:
+                st.session_state.autenticado = True
+                st.success('Acceso correcto.')
+                try:
+                    _write_auth_token(token_path, PASSWORD_SECRET)
+                except Exception:
+                    pass
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
+            else:
+                st.session_state.login_attempts += 1
+                st.error('Contraseña incorrecta. Inténtalo de nuevo.')
+                if st.session_state.login_attempts >= 5:
+                    st.error('Demasiados intentos. Reinicia la app para volver a intentarlo.')
+                    st.stop()
         else:
-            st.session_state.login_attempts += 1
-            st.error('Contraseña incorrecta. Inténtalo de nuevo.')
-            if st.session_state.login_attempts >= 5:
-                st.error('Demasiados intentos. Reinicia la app para volver a intentarlo.')
-                st.stop()
-    else:
-        # Si no se ha firmado el form (ni pulsado enter ni el botón), no continuar
-        st.stop()
+            st.stop()
 
 
 # **NUEVO: CSS Personalizado para Responsividad en Móvil**
