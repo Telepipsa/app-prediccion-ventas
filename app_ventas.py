@@ -31,6 +31,7 @@ import time
 import numpy as np  # Añadido para cálculos de tendencia
 import urllib.parse
 import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25 
+import re
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -77,38 +78,30 @@ if not st.session_state.autenticado:
                         line_stripped = line.strip()
                         if line_stripped.upper().startswith('PASSWORD') and '=' in line_stripped:
                             _, rhs = line_stripped.split('=', 1)
-                            rhs = rhs.strip().strip('\"').strip("'")
-                            if rhs:
-                                PASSWORD_SECRET = rhs
-                                break
+                            rhs = rhs.strip().strip('"').strip("'")
+                            PASSWORD_SECRET = rhs
             except Exception:
                 PASSWORD_SECRET = None
 
-    # --- Autenticación persistente local (opcional para desarrollo) ---
-    # Guardamos un token HMAC simple en `.streamlit/.auth_token` para permitir
-    # restaurar la sesión después de un F5/refresh en entornos locales.
-    # El token es un timestamp + firma HMAC-SHA256 basada en la contraseña.
-    proyecto_dir = os.path.dirname(os.path.abspath(__file__))
-    token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
+        # Path to local auth token used in dev for restoring sessions
+        token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
 
-    def _validate_auth_token(path, secret, max_age_days=7):
-        try:
-            if not path or not os.path.exists(path):
+        def _validate_auth_token(path, secret, max_age_days=30):
+            try:
+                if not os.path.exists(path):
+                    return False
+                with open(path, 'r', encoding='utf-8') as tf:
+                    content = tf.read().strip()
+                if ':' not in content:
+                    return False
+                ts_str, sig = content.split(':', 1)
+                ts = int(ts_str)
+                if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
+                    return False
+                expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
+                return hmac.compare_digest(expected, sig)
+            except Exception:
                 return False
-            with open(path, 'r', encoding='utf-8') as tf:
-                content = tf.read().strip()
-            if ':' not in content:
-                return False
-            ts_str, sig = content.split(':', 1)
-            ts = int(ts_str)
-            # Check age
-            if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
-                return False
-            # Recompute expected signature
-            expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
-            return hmac.compare_digest(expected, sig)
-        except Exception:
-            return False
 
     def _write_auth_token(path, secret):
         try:
@@ -240,7 +233,8 @@ st.markdown("""
 COSTO_HORA_PERSONAL = 11.9
 ARCHIVOS_PERSISTENCIA = {
     'ventas': 'ventas_historicas.csv',
-    'eventos': 'eventos_anomalos.json'
+    'eventos': 'eventos_anomalos.json',
+    'partidos': 'partidos_fcb.json'
 }
 DIAS_SEMANA = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
@@ -347,8 +341,12 @@ def get_daily_limits(ventas_dia, dia_semana_num):
 # --- Funciones de Utilidad (Datos) ---
 
 def cargar_datos_persistentes():
-    """Carga los datos guardados en archivos locales al iniciar la sesión.""" 
-    if 'datos_cargados' not in st.session_state:
+    """Carga los datos guardados en archivos locales al iniciar la sesión.
+    Nota: se inicializa si la clave `datos_cargados` no existe O es False.
+    Esto permite que la operación de borrado (que pone `datos_cargados=False`)
+    fuerce una recarga limpia en el siguiente rerun de la app.
+    """
+    if not st.session_state.get('datos_cargados', False):
         st.session_state.df_historico = pd.DataFrame(columns=['ventas'])
         st.session_state.df_historico.index.name = 'fecha'
 
@@ -371,6 +369,15 @@ def cargar_datos_persistentes():
                 st.session_state.eventos = {}
         else:
             st.session_state.eventos = {}
+        # Cargar partidos FCB persistidos (si existen)
+        if os.path.exists(ARCHIVOS_PERSISTENCIA.get('partidos', '')):
+            try:
+                with open(ARCHIVOS_PERSISTENCIA['partidos'], 'r', encoding='utf-8') as f:
+                    st.session_state.fcb_matches = json.load(f)
+            except json.JSONDecodeError:
+                st.session_state.fcb_matches = {}
+        else:
+            st.session_state.fcb_matches = {}
         
         st.session_state.datos_cargados = True
         st.session_state.show_delete_modal = False
@@ -386,6 +393,12 @@ def guardar_datos(tipo):
             with open(ARCHIVOS_PERSISTENCIA['eventos'], 'w', encoding='utf-8') as f:
                 eventos_serializables = {str(k): v for k, v in st.session_state.eventos.items()}
                 json.dump(eventos_serializables, f, indent=4)
+        elif tipo == 'partidos' and 'fcb_matches' in st.session_state:
+            try:
+                with open(ARCHIVOS_PERSISTENCIA['partidos'], 'w', encoding='utf-8') as f:
+                    json.dump(st.session_state.get('fcb_matches', {}), f, indent=4)
+            except Exception as e:
+                st.sidebar.error(f"Error guardando partidos: {e}")
     except Exception as e:
         st.sidebar.error(f"Error al guardar {tipo}: {e}")
 
@@ -454,6 +467,67 @@ def procesar_archivo_eventos(archivo):
         return eventos_dict
     except Exception as e:
         st.error(f"Error procesando el archivo de eventos: {e}")
+        return None
+
+def procesar_archivo_partidos(archivo):
+    """
+    Lee CSV/Excel de partidos del FCB y lo convierte en dict con fecha->descripcion.
+    Se espera al menos dos columnas: 'Fecha' y 'Partido' (case-insensitive).
+    """
+    try:
+        if archivo.name.endswith('.csv'):
+            df = pd.read_csv(archivo)
+        elif archivo.name.endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(archivo)
+        else:
+            st.error("Formato de archivo no soportado. Use CSV o Excel.")
+            return None
+
+        # normalizar nombres de columnas
+        cols = {c.lower(): c for c in df.columns}
+        fecha_col = None; partido_col = None
+        for k, v in cols.items():
+            if 'fecha' == k or 'date' == k:
+                fecha_col = v
+            if 'partido' in k or 'match' in k or 'oponente' in k or 'competicion' in k:
+                partido_col = v
+        if fecha_col is None or partido_col is None:
+            # intentar heurístico por primera y segunda columna
+            if len(df.columns) >= 2:
+                fecha_col = df.columns[0]; partido_col = df.columns[1]
+            else:
+                st.error("El archivo debe contener al menos las columnas 'Fecha' y 'Partido'.")
+                return None
+
+        # Normalizar: quitar sufijos de hora (e.g. ' - 21:30') y espacios extra
+        # Conservar valor original para extraer la hora si existe
+        raw_fecha = df[fecha_col].astype(str).str.strip()
+        # Extraer hora si viene en el formato ' - HH:MM' o ' HH:MM' o 'HH:MM' al final
+        horas = raw_fecha.str.extract(r"(\d{1,2}:\d{2})$")[0].fillna('')
+        # Normalizar: quitar sufijos de hora para parsear la fecha
+        cleaned = raw_fecha.str.replace(r"\s*-\s*\d{1,2}:\d{2}$", "", regex=True)
+        cleaned = cleaned.str.replace(r"\s+\d{1,2}:\d{2}$", "", regex=True)
+        # Interpretar fechas con día primero (dd/mm/yyyy) para locales ES
+        df[fecha_col] = pd.to_datetime(cleaned, dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[fecha_col])
+        df[partido_col] = df[partido_col].astype(str)
+
+        partidos = {}
+        for ix, row in df.iterrows():
+            fecha_dt = row[fecha_col]
+            if pd.isna(fecha_dt):
+                continue
+            # guardamos por fecha (sin hora) en formato YYYY-MM-DD
+            fecha_str = pd.to_datetime(fecha_dt).strftime('%Y-%m-%d')
+            hora_val = horas.iloc[ix] if ix < len(horas) else ''
+            hora_val = hora_val if hora_val != '' else None
+            partidos[fecha_str] = {
+                'partido': row[partido_col],
+                'hora': hora_val
+            }
+        return partidos
+    except Exception as e:
+        st.error(f"Error procesando el archivo de partidos: {e}")
         return None
 
 # --- Lógica de predicción y reglas ---
@@ -635,43 +709,199 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
     fecha_base_exacta = fecha_actual.replace(year=base_year)
     fecha_str_base = fecha_base_exacta.strftime('%Y-%m-%d')
 
+    is_domingo = fecha_actual.weekday() == 6
+
+    # Regla prioritaria: si la fecha actual es domingo, forzamos búsqueda de domingos
+    # en el año base dentro de una ventana +/-7 días y devolvemos el domingo más cercano
+    if is_domingo:
+        try:
+            ventana_start = fecha_base_exacta - timedelta(days=7)
+            ventana_end = fecha_base_exacta + timedelta(days=7)
+            df_window_dom = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
+            sunday_cands = df_window_dom[df_window_dom.index.weekday == 6]
+            if not sunday_cands.empty:
+                forward = sunday_cands[sunday_cands.index >= fecha_base_exacta]
+                if len(forward) > 0:
+                    diffs = (forward.index - fecha_base_exacta).days
+                    chosen_idx = forward.index[diffs.argmin()]
+                else:
+                    diffs_all = (sunday_cands.index - fecha_base_exacta).days.abs()
+                    chosen_idx = sunday_cands.index[diffs_all.argmin()]
+                return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+
     if es_festivo(fecha_actual) or es_vispera_de_festivo(fecha_actual):
         if fecha_base_exacta in df_base.index:
             return df_base.loc[fecha_base_exacta, 'ventas'], fecha_str_base
-        # Si no hay la fecha exacta en el año base, preferimos la misma semana del mes
-        mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
-        wom = week_of_month_custom(fecha_actual)
-        df_mes = df_base[df_base.index.month == mes].copy()
-        festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
-        mask_no_festivo = ~df_mes.index.isin(festivos_base)
-        if exclude_eventos:
-            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
-        else:
-            mask_no_event = pd.Series(True, index=df_mes.index)
-        df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
-        # Buscar un día en el mismo week-of-month y weekday (p. ej. primer lunes de diciembre)
-        candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
-        if not candidates.empty:
-            wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
-            same_wom = candidates[wom_series == wom]
-            if not same_wom.empty:
-                # Devolver la ocurrencia correspondiente a la misma semana del mes
-                chosen_idx = same_wom.index[-1]
-                return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
-        # Fallback: usar media mensual por weekday (excluyendo eventos/festivos)
-        ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
-        return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
+            # Caso: festivo o víspera. Reglas especiales:
+            # - Festivos se comparan preferentemente con festivos del año base.
+            # - Si es víspera y cae en viernes/sábado, buscar viernes/sábado equivalente de la misma semana;
+            #   si el candidato en el año base es a su vez festivo, probar la semana anterior.
+            # - Los domingos serán tratados especialmente en la búsqueda (ver is_domingo mask arriba).
+            mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
+            wom = week_of_month_custom(fecha_actual)
+            df_mes = df_base[df_base.index.month == mes].copy()
+            festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+
+            # Helper: safe check for date in df_base
+            def exists_in_df(dt):
+                return dt in df_base.index
+
+            # 1) Intentar fecha exacta en el año base
+            if fecha_base_exacta in df_base.index:
+                # Si fecha actual es festivo, preferimos que la fecha base también sea festivo
+                if es_festivo(fecha_actual):
+                    if fecha_base_exacta in festivos_base:
+                        return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
+                    # si la fecha exacta no es festivo en el año base, seguimos buscando festivos en el mes
+                else:
+                    return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
+
+            # 2) Si es festivo: buscar festivos en el mes que coincidan en weekday
+            if es_festivo(fecha_actual):
+                festivos_en_mes = [d for d in festivos_base if d.month == mes and d.weekday() == dia_semana_num]
+                if festivos_en_mes:
+                    # elegir el festivo más cercano al objetivo (preferir forward)
+                    festivos_idx = pd.DatetimeIndex(festivos_en_mes)
+                    forward = festivos_idx[festivos_idx >= fecha_base_exacta]
+                    if len(forward) > 0:
+                        chosen_idx = forward[0]
+                    else:
+                        diffs = (festivos_idx - fecha_base_exacta).days.abs()
+                        chosen_idx = festivos_idx[diffs.argmin()]
+                    if chosen_idx in df_base.index:
+                        return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+
+            # 3) Regla especial para vísperas FRIDAY: comparar con el viernes del año anterior
+            #    Si ese viernes en el año base es festivo, retroceder una semana (viernes anterior) hasta encontrar uno no-festivo.
+            if es_vispera_de_festivo(fecha_actual) and dia_semana_num == 4:
+                # preferir la fecha exacta reemplazada al año base (mismo día/mes)
+                try:
+                    if fecha_base_exacta in df_base.index and fecha_base_exacta not in festivos_base:
+                        return float(df_base.loc[fecha_base_exacta, 'ventas']), fecha_base_exacta.strftime('%Y-%m-%d')
+                    # si en el año base ese viernes es festivo (o no existe), buscar el viernes de la semana anterior no festivo
+                    alt = fecha_base_exacta - timedelta(days=7)
+                    attempts = 0
+                    while attempts < 4:
+                        if alt in df_base.index and alt.weekday() == 4 and alt not in festivos_base:
+                            return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
+                        alt = alt - timedelta(days=7)
+                        attempts += 1
+                except Exception:
+                    pass
+            # 3b) Si es víspera y cae en viernes/sábado, buscar equivalente viernes/sábado de la misma semana;
+            #    si el candidato en el año base resulta ser festivo, probar la semana anterior.
+            if es_vispera_de_festivo(fecha_actual) and dia_semana_num in (4, 5):
+                # buscar candidatos en el mismo mes y weekday
+                candidates = df_mes[df_mes.index.weekday == dia_semana_num].copy()
+                if not candidates.empty:
+                    wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
+                    same_wom = candidates[wom_series == wom]
+                    if not same_wom.empty:
+                        chosen_idx = same_wom.index[-1]
+                        # si el elegido en el año base es festivo, intentar candidato una semana antes
+                        if chosen_idx in festivos_base:
+                            alt = chosen_idx - timedelta(days=7)
+                            if alt in df_base.index and alt not in festivos_base:
+                                return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
+                            # si la semana anterior también es festiva o no existe, mantenemos chosen_idx
+                        if chosen_idx in df_base.index:
+                            return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+
+                # ventana +/-7 días: preferir same weekday and avoid festivos as primary, else try previous week
+                try:
+                    ventana_start = fecha_base_exacta - timedelta(days=7)
+                    ventana_end = fecha_base_exacta + timedelta(days=7)
+                    df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
+                    window_cands = df_window[df_window.index.weekday == dia_semana_num]
+                    if not window_cands.empty:
+                        # prefer same wom candidates
+                        wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
+                        same_wom_window = window_cands[wom_window == wom]
+                        if not same_wom_window.empty:
+                            idxs = same_wom_window.index
+                            forward = idxs[idxs >= fecha_base_exacta]
+                            if len(forward) > 0:
+                                chosen_idx = forward[0]
+                            else:
+                                diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
+                                chosen_idx = diffs.idxmin()
+                            # if chosen is festivo, try previous week
+                            if chosen_idx in festivos_base:
+                                alt = chosen_idx - timedelta(days=7)
+                                if alt in df_base.index and alt not in festivos_base:
+                                    return float(df_base.loc[alt, 'ventas']), alt.strftime('%Y-%m-%d')
+                            return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+                except Exception:
+                    pass
+
+            # 4) Fallback general para festivos/vísperas: intentar misma week-of-month evitando festivos (salvo domingos)
+            if is_domingo:
+                mask_no_festivo = pd.Series(True, index=df_mes.index)
+                mask_no_event = pd.Series(True, index=df_mes.index)
+            else:
+                mask_no_festivo = ~df_mes.index.isin(festivos_base)
+                mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_mes.index)
+            df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
+            candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
+            if not candidates.empty:
+                wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
+                same_wom = candidates[wom_series == wom]
+                if not same_wom.empty:
+                    chosen_idx = same_wom.index[-1]
+                    return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+            # ventana +/-7 días
+            try:
+                ventana_start = fecha_base_exacta - timedelta(days=7)
+                ventana_end = fecha_base_exacta + timedelta(days=7)
+                df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
+                if is_domingo:
+                    mask_no_f = pd.Series(True, index=df_window.index)
+                    mask_no_e = pd.Series(True, index=df_window.index)
+                else:
+                    mask_no_f = ~df_window.index.isin(festivos_base)
+                    mask_no_e = ~df_window.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_window.index)
+                df_window_sano = df_window[mask_no_f & mask_no_e]
+                window_cands = df_window_sano[df_window_sano.index.weekday == dia_semana_num]
+                if not window_cands.empty:
+                    wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
+                    same_wom_window = window_cands[wom_window == wom]
+                    if not same_wom_window.empty:
+                        idxs = same_wom_window.index
+                        forward = idxs[idxs >= fecha_base_exacta]
+                        if len(forward) > 0:
+                            diffs_forward = (forward - fecha_base_exacta).days
+                            chosen_idx = forward[diffs_forward.argmin()]
+                        else:
+                            diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
+                            chosen_idx = diffs.idxmin()
+                        return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+            except Exception:
+                pass
+            # Fallback final: media por weekday en el mes
+            series_weekday = df_mes[df_mes.index.weekday == dia_semana_num]['ventas']
+            if not series_weekday.empty:
+                chosen_idx = series_weekday.index[-1]
+                return float(series_weekday.iloc[-1]), chosen_idx.strftime('%Y-%m-%d')
+            ventas_base = series_weekday.mean() if not series_weekday.empty else np.nan
+            return (0.0 if pd.isna(ventas_base) else ventas_base), fecha_str_base
 
     # Para días normales, preferimos la misma week-of-month en el año base
     mes = fecha_actual.month; dia_semana_num = fecha_actual.weekday()
     wom = week_of_month_custom(fecha_actual)
     df_mes = df_base[df_base.index.month == mes].copy()
     festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
-    mask_no_festivo = ~df_mes.index.isin(festivos_base)
-    if exclude_eventos:
-        mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
-    else:
+    # Para domingos preferimos mantener la comparación con domingos del año base
+    if is_domingo:
+        mask_no_festivo = pd.Series(True, index=df_mes.index)
         mask_no_event = pd.Series(True, index=df_mes.index)
+    else:
+        mask_no_festivo = ~df_mes.index.isin(festivos_base)
+        if exclude_eventos:
+            mask_no_event = ~df_mes.index.astype(str).isin(eventos_dict.keys())
+        else:
+            mask_no_event = pd.Series(True, index=df_mes.index)
     df_mes_sano = df_mes[mask_no_festivo & mask_no_event]
     candidates = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num].copy()
     if not candidates.empty:
@@ -680,7 +910,42 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
         if not same_wom.empty:
             chosen_idx = same_wom.index[-1]
             return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+    # Si no encontramos en el mismo mes, buscar en ventana +/-7 días alrededor de la fecha objetivo
+    try:
+        fecha_base_exacta = fecha_actual.replace(year=base_year)
+        ventana_start = fecha_base_exacta - timedelta(days=7)
+        ventana_end = fecha_base_exacta + timedelta(days=7)
+        df_window = df_base[(df_base.index >= ventana_start) & (df_base.index <= ventana_end)].copy()
+        festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+        # Para domingo no excluimos festivos/eventos en la ventana
+        if is_domingo:
+            mask_no_f = pd.Series(True, index=df_window.index)
+            mask_no_e = pd.Series(True, index=df_window.index)
+        else:
+            mask_no_f = ~df_window.index.isin(festivos_base)
+            mask_no_e = ~df_window.index.astype(str).isin(eventos_dict.keys()) if exclude_eventos else pd.Series(True, index=df_window.index)
+        df_window_sano = df_window[mask_no_f & mask_no_e]
+        window_cands = df_window_sano[df_window_sano.index.weekday == dia_semana_num]
+        if not window_cands.empty:
+            wom_window = pd.Series([week_of_month_custom(d) for d in window_cands.index.day], index=window_cands.index)
+            same_wom_window = window_cands[wom_window == wom]
+            if not same_wom_window.empty:
+                idxs = same_wom_window.index
+                forward = idxs[idxs >= fecha_base_exacta]
+                if len(forward) > 0:
+                    diffs_forward = (forward - fecha_base_exacta).days
+                    chosen_idx = forward[diffs_forward.argmin()]
+                else:
+                    diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
+                    chosen_idx = diffs.idxmin()
+                return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
+    except Exception:
+        pass
     ventas_base = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas'].mean()
+    series_weekday = df_mes_sano[df_mes_sano.index.weekday == dia_semana_num]['ventas']
+    if not series_weekday.empty:
+        chosen_idx = series_weekday.index[-1]
+        return float(series_weekday.iloc[-1]), chosen_idx.strftime('%Y-%m-%d')
     if pd.isna(ventas_base):
         return 0.0, fecha_str_base
     return ventas_base, fecha_str_base
@@ -721,7 +986,16 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
     else:
         fecha_inicio_semana = datetime.combine(fecha_inicio_semana_date, datetime.min.time())
     
-    CURRENT_YEAR = fecha_inicio_semana.year
+    # Si la semana cruza de año, elegir el año "mayoritario" dentro de los 7 días
+    week_years = [ (fecha_inicio_semana + timedelta(days=i)).year for i in range(7) ]
+    try:
+        from collections import Counter
+        year_counts = Counter(week_years)
+        # coger el año con más ocurrencias; en empate preferir el mayor (más cercano al futuro)
+        most_common = sorted(year_counts.items(), key=lambda x: (x[1], x[0]), reverse=True)[0][0]
+        CURRENT_YEAR = int(most_common)
+    except Exception:
+        CURRENT_YEAR = fecha_inicio_semana.year
     BASE_YEAR = CURRENT_YEAR - 1
 
     predicciones = []
@@ -762,6 +1036,53 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 avg_wom = global_avg_wom.get(wom, first_wom_avg)
                 decay_factor = avg_wom / first_wom_avg if first_wom_avg > 0 else 1.0
                 decay_factors[wom] = np.clip(decay_factor, 0.8, 1.2)
+
+        # --- Nuevo: determinar la fecha de inicio de la semana en el año base POR CADA DÍA
+        # Esto asegura que, para días en los primeros días del año, la comparación
+        # se haga respecto al año anterior de ese día concreto (fecha.year - 1).
+        base_week_starts = [None] * 7
+        try:
+            for j in range(7):
+                target_date = fecha_inicio_semana + timedelta(days=j)
+                target_wom = week_of_month_custom(target_date)
+                target_base_year = target_date.year - 1
+                fecha_inicio_base_candidate = target_date.replace(year=target_base_year)
+                # Dataset del año base específico para este día
+                df_base_year = df_historico[df_historico.index.year == target_base_year]
+                if df_base_year.empty:
+                    base_week_starts[j] = None
+                    continue
+                # Buscar lunes en el mismo mes del año base
+                df_base_month = df_base_year[df_base_year.index.month == target_date.month]
+                mondays = df_base_month[df_base_month.index.weekday == 0].copy()
+                chosen = None
+                if not mondays.empty:
+                    wom_series = pd.Series([week_of_month_custom(d) for d in mondays.index.day], index=mondays.index)
+                    same_wom = mondays[wom_series == target_wom]
+                    if not same_wom.empty:
+                        forward = same_wom[same_wom.index >= fecha_inicio_base_candidate]
+                        if len(forward) > 0:
+                            diffs_forward = (forward.index - fecha_inicio_base_candidate).days
+                            chosen = forward.index[diffs_forward.argmin()]
+                        else:
+                            chosen = same_wom.index[-1]
+                # Si no hay candidato en el mismo mes, buscar en ventana +-7 días alrededor
+                if chosen is None:
+                    ventana_start = fecha_inicio_base_candidate - timedelta(days=7)
+                    ventana_end = fecha_inicio_base_candidate + timedelta(days=7)
+                    df_window = df_base_year[(df_base_year.index >= ventana_start) & (df_base_year.index <= ventana_end)].copy()
+                    window_mondays = df_window[df_window.index.weekday == 0]
+                    if not window_mondays.empty:
+                        forward = window_mondays[window_mondays.index >= fecha_inicio_base_candidate]
+                        if len(forward) > 0:
+                            diffs_forward = (forward.index - fecha_inicio_base_candidate).days
+                            chosen = forward.index[diffs_forward.argmin()]
+                        else:
+                            diffs = (window_mondays.index - fecha_inicio_base_candidate).days.abs()
+                            chosen = diffs.idxmin()
+                base_week_starts[j] = chosen
+        except Exception:
+            base_week_starts = [None] * 7
     
     for i in range(7):
         fecha_actual = fecha_inicio_semana + timedelta(days=i)
@@ -770,43 +1091,170 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         # inicializar variables de momentum/changes para evitar NameError
         avg_pct_mom = 0.0
         pct_changes = []
-        fecha_base_historica, ventas_base_historica = obtener_dia_base_historica(fecha_actual, df_historico)
+        # Inicializar placeholders para la fecha/ventas base que se usarán realmente
+        fecha_base_historica = None
+        ventas_base_historica = None
+        selected_rule = None
         # Si la fecha actual es un evento manual, incluir también fechas marcadas como "evento"
         # en la búsqueda de la base histórica (no excluir eventos manuales del histórico base)
         is_evento_manual = (fecha_str in eventos)
-        ventas_base, fecha_base_str = calcular_base_historica_para_dia(fecha_actual, df_base, eventos, exclude_eventos=(not is_evento_manual))
+        # Determinar si la fecha actual es festivo automático (necesario antes de usarlo)
+        try:
+            is_festivo_auto = (fecha_actual in festivos_es) or es_festivo(fecha_actual)
+        except Exception:
+            is_festivo_auto = False
+
+        # Intentar utilizar la semana base calculada anteriormente para mantener consistencia
+        ventas_base = None
+        fecha_base_str = None
+        if 'base_week_starts' in locals() and base_week_starts and base_week_starts[i] is not None:
+            try:
+                monday = base_week_starts[i]
+                candidate_base_date = monday + timedelta(days=fecha_actual.weekday())
+                # Forzar que el candidato pertenezca al año anterior relativo a la fecha actual
+                target_base_year = fecha_actual.year - 1
+                if candidate_base_date.year != target_base_year:
+                    raise ValueError('candidate not in base year')
+                candidate_str = candidate_base_date.strftime('%Y-%m-%d')
+                # Verificar existencia en el histórico (usar df_historico para soportar distintos años)
+                if candidate_base_date in df_historico.index:
+                    # Asegurarnos también de que la fila encontrada corresponde al año base filtrado
+                    if (candidate_base_date.year == target_base_year) and (is_evento_manual or (candidate_str not in eventos)):
+                        ventas_base = float(df_historico.loc[candidate_base_date, 'ventas'])
+                        fecha_base_str = candidate_str
+                        fecha_base_historica = fecha_base_str
+                        ventas_base_historica = ventas_base
+                        # inicialmente marcamos que vino del mapeo por semana
+                        selected_rule = 'base_week_start'
+                        # Si la fecha actual es víspera de festivo y cae en viernes,
+                        # preferimos aplicar la lógica especializada (no comparar vísperas con vísperas/festivos)
+                        try:
+                            if es_vispera_de_festivo(fecha_actual) and fecha_actual.weekday() == 4:
+                                # si el candidato en el año base es festivo o es víspera, forzamos recalcular
+                                try:
+                                    candidate_is_festivo = es_festivo(candidate_base_date) or (candidate_base_date in pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == candidate_base_date.year]))
+                                except Exception:
+                                    candidate_is_festivo = False
+                                try:
+                                    candidate_is_vispera = es_vispera_de_festivo(candidate_base_date)
+                                except Exception:
+                                    candidate_is_vispera = False
+                                if candidate_is_festivo or candidate_is_vispera:
+                                    # Forzar uso de la función central que aplica la regla de vísperas
+                                    ventas_base_alt, fecha_base_alt = calcular_base_historica_para_dia(fecha_actual, df_base, eventos, exclude_eventos=(not is_evento_manual))
+                                    if fecha_base_alt:
+                                        ventas_base = ventas_base_alt
+                                        fecha_base_str = fecha_base_alt
+                                        fecha_base_historica = fecha_base_str
+                                        ventas_base_historica = ventas_base
+                                        selected_rule = f'forced_calcular_base_from_week_start:{fecha_base_str}'
+                        except Exception:
+                            pass
+            except Exception:
+                ventas_base = None
+
+        # Si no hemos podido asignar por la semana base referenciada, usar la búsqueda por día existente
+        if ventas_base is None:
+            ventas_base, fecha_base_str = calcular_base_historica_para_dia(fecha_actual, df_base, eventos, exclude_eventos=(not is_evento_manual))
+            # marcar regla elegida (calcular_base devuelve la fecha usada)
+            try:
+                selected_rule = f"calcular_base:{fecha_base_str}"
+            except Exception:
+                selected_rule = 'calcular_base:unknown'
+            # Asegurar que la fecha_base utilizada se guarde de forma consistente
+            try:
+                fecha_base_historica = fecha_base_str
+                ventas_base_historica = ventas_base
+            except Exception:
+                fecha_base_historica = None
+                ventas_base_historica = ventas_base
         if pd.isna(ventas_base): ventas_base = 0.0
 
         # Si la fecha base exacta existe y en el año base era festivo/víspera,
         # pero la fecha actual NO es festivo/evento, entonces usamos la media
         # de las últimas 4 ocurrencias de ese weekday en el año base (excluyendo festivos/eventos).
+        fecha_base_exacta = None
         try:
-            fecha_base_exacta = None
-            try:
-                fecha_base_exacta = fecha_actual.replace(year=BASE_YEAR)
-            except Exception:
-                fecha_base_exacta = None
-            if fecha_base_exacta is not None and fecha_base_exacta in df_base.index and not (is_evento_manual or is_festivo_auto):
-                # comprobar si la fecha base era festivo o víspera
-                if es_festivo(fecha_base_exacta) or es_vispera_de_festivo(fecha_base_exacta):
-                    # calcular media de las últimas 4 ocurrencias del mismo weekday en el año base, excluyendo eventos/festivos
-                    # usar el weekday del día actual para obtener las últimas ocurrencias del mismo weekday
-                    target_wd = fecha_actual.weekday()
-                    festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == BASE_YEAR])
-                    eventos_mask = eventos
-                    df_base_year = df_base.copy()
-                    mask_no_f = ~df_base_year.index.isin(festivos_b)
-                    mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
-                    df_base_clean = df_base_year[mask_no_f & mask_no_e]
-                    occ_prev_all = df_base_clean[df_base_clean.index.weekday == target_wd].sort_index()
-                    # tomar hasta las últimas 4 antes de la fecha base exacta
-                    occ_prev = occ_prev_all[occ_prev_all.index < fecha_base_exacta]
-                    prev_vals_tmp = list(occ_prev['ventas'].iloc[-4:]) if len(occ_prev) > 0 else []
-                    if prev_vals_tmp:
-                        ventas_base = float(np.mean(prev_vals_tmp))
-                        prev_vals_local = prev_vals_tmp
+            fecha_base_exacta = fecha_actual.replace(year=BASE_YEAR)
         except Exception:
-            pass
+            fecha_base_exacta = None
+
+        if fecha_base_exacta is not None and fecha_base_exacta in df_base.index and not (is_evento_manual or is_festivo_auto):
+            # Solo aplicar la regla de 'media de últimas ocurrencias' si la fecha base exacta
+            # es la que se hubiera usado como fecha base (es decir, no hemos elegido ya
+            # otro candidato mediante la lógica anterior como ocurre con vísperas especiales).
+            try:
+                fecha_base_dt_current = pd.to_datetime(fecha_base_historica) if fecha_base_historica else None
+            except Exception:
+                fecha_base_dt_current = None
+            if fecha_base_dt_current is not None and fecha_base_dt_current != fecha_base_exacta:
+                # Hemos seleccionado otro candidato (p.ej. viernes no-festivo), no sobreescribir.
+                skip_media_prev = True
+            else:
+                skip_media_prev = False
+            # comprobar si la fecha base era festivo o víspera
+            if not skip_media_prev and (es_festivo(fecha_base_exacta) or es_vispera_de_festivo(fecha_base_exacta)):
+                # calcular media de las últimas 4 ocurrencias del mismo weekday en el año base, excluyendo eventos/festivos
+                # usar el weekday del día actual para obtener las últimas ocurrencias del mismo weekday
+                target_wd = fecha_actual.weekday()
+                festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == BASE_YEAR])
+                eventos_mask = eventos
+                df_base_year = df_base.copy()
+                mask_no_f = ~df_base_year.index.isin(festivos_b)
+                mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
+                df_base_clean = df_base_year[mask_no_f & mask_no_e]
+                occ_prev_all = df_base_clean[df_base_clean.index.weekday == target_wd].sort_index()
+                # tomar hasta las últimas 4 antes de la fecha base exacta
+                occ_prev = occ_prev_all[occ_prev_all.index < fecha_base_exacta]
+                prev_vals_tmp = list(occ_prev['ventas'].iloc[-4:]) if len(occ_prev) > 0 else []
+                if prev_vals_tmp:
+                    ventas_base = float(np.mean(prev_vals_tmp))
+                    prev_vals_local = prev_vals_tmp
+                    # Setear la fecha_base_historica al último día usado para la media (más reciente)
+                    try:
+                        last_date = occ_prev.index[-1]
+                        fecha_base_historica = last_date.strftime('%Y-%m-%d')
+                        ventas_base_historica = float(df_base.loc[last_date, 'ventas'])
+                    except Exception:
+                        pass
+
+        # --- Nuevo: detectar si en la fecha base utilizada hubo un partido del FCB ---
+        fcb_pct_base = None
+        fcb_prev_vals = []
+        try:
+            fcb_matches = st.session_state.get('fcb_matches', {})
+            # usamos la fecha base real elegida (fecha_base_historica) para comprobar partidos
+            if fecha_base_historica:
+                try:
+                    fecha_base_dt = pd.to_datetime(fecha_base_historica)
+                except Exception:
+                    fecha_base_dt = None
+                if fecha_base_dt is not None and fecha_base_dt in df_base.index:
+                    fecha_base_key = fecha_base_dt.strftime('%Y-%m-%d')
+                    if fecha_base_key in fcb_matches:
+                        # venta en la fecha del partido en el año base
+                        ventas_partido = float(df_base.loc[fecha_base_dt, 'ventas'])
+                        # buscar las 3 últimas ocurrencias del mismo weekday en el año base
+                        occ_same_wd = df_base[df_base.index.weekday == fecha_base_dt.weekday()].sort_index()
+                        occ_prev_same = occ_same_wd[occ_same_wd.index < fecha_base_dt]
+                        # filtrar para excluir días con partido FCB, festivos o vísperas
+                        occ_prev_filtered = []
+                        for d in reversed(list(occ_prev_same.index)):
+                            d_str = d.strftime('%Y-%m-%d')
+                            if d_str in fcb_matches:
+                                continue
+                            if es_festivo(d) or es_vispera_de_festivo(d):
+                                continue
+                            occ_prev_filtered.append(float(df_base.loc[d, 'ventas']))
+                            if len(occ_prev_filtered) >= 3:
+                                break
+                        if len(occ_prev_filtered) > 0 and np.mean(occ_prev_filtered) > 0:
+                            mean_prev = float(np.mean(occ_prev_filtered))
+                            fcb_prev_vals = list(reversed(occ_prev_filtered))
+                            # porcentaje de cambio relativo al día del partido: (partido - mean_prev)/mean_prev
+                            fcb_pct_base = (ventas_partido - mean_prev) / mean_prev
+        except Exception:
+            fcb_pct_base = None
 
         ultimas_4_semanas = df_current_hist[df_current_hist.index.weekday == dia_semana_num].sort_index(ascending=False).head(4)
         media_reciente_current = ultimas_4_semanas['ventas'].mean() if not ultimas_4_semanas.empty else ventas_base
@@ -815,11 +1263,19 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         factor_tendencia = calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8)
         media_ajustada_tendencia = media_reciente_current * factor_tendencia
         ventas_base_ajustada_ytd = ventas_base * ytd_factor
-        prediccion_base_ajustada = (ventas_base_ajustada_ytd * 0.4) + (media_ajustada_tendencia * 0.6)
+        # Ajuste de mezcla: 30% base histórica (año anterior ajustado) + 70% media reciente ajustada
+        prediccion_base_ajustada = (ventas_base_ajustada_ytd * 0.3) + (media_ajustada_tendencia * 0.7)
+        # guardar debug intermedio
+        pred_before_decay = float(prediccion_base_ajustada)
         
         wom = week_of_month_custom(fecha_actual)
         decay_factor = decay_factors.get(wom, 1.0)
         prediccion_base = prediccion_base_ajustada * decay_factor
+        # guardar predicción antes de clipping para auditoría
+        try:
+            pred_before_clipping = float(prediccion_base)
+        except Exception:
+            pred_before_clipping = None
         # Guardar la predicción base 'normal' antes de cualquier recalculo
         # específico de eventos. Si existe un `impacto_manual_pct` declaradoo
         # queremos aplicar ese % sobre esta `original_prediccion_base`.
@@ -1139,6 +1595,16 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         except Exception:
             sanity_clipped = False
 
+        # valores de depuración adicionales
+        try:
+            low_ref_val = low_ref
+        except Exception:
+            low_ref_val = None
+        try:
+            high_ref_val = high_ref
+        except Exception:
+            high_ref_val = None
+
         # Aplicar un extra del +1% para la primera semana del mes (evitar subestimaciones)
         try:
             wom_extra = week_of_month_custom(fecha_actual)
@@ -1159,6 +1625,35 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
 
         # Recalcular predicción final aplicando impacto_evento
         prediccion_final = prediccion_base * impacto_evento
+        # Aplicar ajuste por partido FCB si procede (cuando hay partido en año base y hoy hay partido/manual describe 'FCB')
+        try:
+            fcb_matches = st.session_state.get('fcb_matches', {})
+            apply_fcb = False
+            if fecha_str in fcb_matches:
+                apply_fcb = True
+            elif fecha_str in eventos:
+                ev = eventos.get(fecha_str, {})
+                desc = ev.get('descripcion', '') if isinstance(ev, dict) else str(ev)
+                if 'FCB' in desc.upper():
+                    apply_fcb = True
+            if fcb_pct_base is not None and apply_fcb:
+                impacto_fcb = 1.0 + float(fcb_pct_base)
+                # guardar antes de FCB
+                try:
+                    pred_before_fcb = float(prediccion_final)
+                except Exception:
+                    pred_before_fcb = None
+                prediccion_final = prediccion_final * impacto_fcb
+                # marcar el tipo de evento con etiqueta FCB (se añadirá a lo ya existente)
+                if 'FCB' not in tipo_evento.upper():
+                    tipo_evento = f"{tipo_evento} + FCB"
+        except Exception:
+            pass
+        try:
+            if 'pred_before_fcb' not in locals():
+                pred_before_fcb = float(prediccion_final)
+        except Exception:
+            pred_before_fcb = None
 
         ventas_reales_current = None
         if fecha_actual_ts in df_historico.index:
@@ -1178,6 +1673,85 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             if abs(ventas_base - prediccion_final) >= 1000:
                 evento_anterior = "POSIBLE EVENTO"
         
+        # recopilar información de partido FCB para auditoría/visualización
+        fcb_match_today = None
+        fcb_match_base = None
+        try:
+            fcb_matches = st.session_state.get('fcb_matches', {})
+            if fecha_str in fcb_matches:
+                fcb_match_today = fcb_matches.get(fecha_str)
+            # usar la fecha base real seleccionada para buscar partido en el año base
+            if fecha_base_historica:
+                try:
+                    fecha_base_key = pd.to_datetime(fecha_base_historica).strftime('%Y-%m-%d')
+                except Exception:
+                    fecha_base_key = str(fecha_base_historica)
+                if fecha_base_key in fcb_matches:
+                    fcb_match_base = fcb_matches.get(fecha_base_key)
+        except Exception:
+            fcb_match_today = None
+            fcb_match_base = None
+
+        # Si aplicamos el ajuste FCB, queremos mostrar el rival en la columna 'evento'
+        try:
+            def extract_opponent(partido_text):
+                try:
+                    if not partido_text:
+                        return None
+                    # si es dict, usar el campo partido
+                    if isinstance(partido_text, dict):
+                        partido_text = partido_text.get('partido', '')
+                    txt = str(partido_text)
+                    # separar por separadores comunes
+                    parts = re.split(r"\s*(?:vs|v|\-|@|\|)\s*", txt, flags=re.I)
+                    # intentar seleccionar la parte que no contiene 'BARCEL' ni 'FCB' (indicador Barça)
+                    for p in parts:
+                        clean = p.strip()
+                        up = clean.upper()
+                        if 'BARC' in up or 'FCB' in up or 'BARÇA' in up or 'BARCELONA' in up:
+                            continue
+                        if clean:
+                            return clean
+                    # fallback: si hay más de una parte devolver la última
+                    if len(parts) > 1:
+                        return parts[-1].strip()
+                    # fallback simple: devolver la cadena completa
+                    return txt.strip()
+                except Exception:
+                    return None
+
+            if fcb_match_today:
+                opponent = extract_opponent(fcb_match_today)
+                if opponent:
+                    fcb_label = f"FCB vs {opponent}"
+                else:
+                    fcb_label = "FCB"
+                # Conservar etiquetas previas (p.ej. 'Víspera' o 'Festivo (Auto)') y añadir la etiqueta FCB
+                try:
+                    # Evitar duplicados: si tipo_evento ya contiene la etiqueta FCB omitimos añadir otra
+                    if 'FCB' in (tipo_evento or '').upper():
+                        # Reemplazar solo si no contiene el vs {opponent} específico
+                        if opponent and f"VS {opponent.upper()}" not in (tipo_evento or '').upper():
+                            # concatenar información del rival
+                            parts = [p.strip() for p in (tipo_evento or '').split('+') if p.strip()]
+                            # remover posibles ocurrencias genéricas 'FCB'
+                            parts = [p for p in parts if 'FCB' not in p.upper()]
+                            parts.append(fcb_label)
+                            tipo_evento = ' + '.join(parts)
+                        # else mantener tal cual
+                    else:
+                        parts = []
+                        if tipo_evento and tipo_evento not in ("Día Normal", ''):
+                            parts.append(tipo_evento)
+                        parts.append(fcb_label)
+                        tipo_evento = ' + '.join(parts)
+                except Exception:
+                    # Fallback seguro: dejar algo indicando FCB
+                    if 'FCB' not in (tipo_evento or '').upper():
+                        tipo_evento = f"{tipo_evento} + {fcb_label}" if tipo_evento and tipo_evento != 'Día Normal' else fcb_label
+        except Exception:
+            pass
+
         predicciones.append({
             'fecha': fecha_actual,
             'dia_semana': DIAS_SEMANA[dia_semana_num],
@@ -1193,11 +1767,24 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             'evento': tipo_evento,
             'explicacion': explicacion,
             'ytd_factor': ytd_factor,
+            'ventas_base_ajustada_ytd': ventas_base_ajustada_ytd,
+            'media_ajustada_tendencia': media_ajustada_tendencia,
+            'pred_before_decay': pred_before_decay if 'pred_before_decay' in locals() else None,
+            'pred_before_clipping': pred_before_clipping if 'pred_before_clipping' in locals() else None,
+            'pred_before_fcb': pred_before_fcb if 'pred_before_fcb' in locals() else None,
             'decay_factor': decay_factor,
+            'low_ref': low_ref_val if 'low_ref_val' in locals() else None,
+            'high_ref': high_ref_val if 'high_ref_val' in locals() else None,
+            'clipped_lower': clipped_lower if 'clipped_lower' in locals() else None,
+            'clipped_upper': clipped_upper if 'clipped_upper' in locals() else None,
+            'selected_rule': selected_rule,
             'weekday_momentum_pct': avg_pct_mom if 'avg_pct_mom' in locals() else None,
             'weekday_momentum_details': ','.join([f"{p:.3f}" for p in (pct_changes if 'pct_changes' in locals() else [])]) if ('pct_changes' in locals()) else '',
             'base_vs_prev_pct': extra_pct_base_vs_prev if 'extra_pct_base_vs_prev' in locals() else None,
             'prev_vals': prev_vals_local,
+            'fcb_match_today': fcb_match_today,
+            'fcb_match_base': fcb_match_base,
+            'fcb_pct_base': (float(fcb_pct_base) * 100) if (fcb_pct_base is not None) else None,
             'sanity_clipped': sanity_clipped if 'sanity_clipped' in locals() else False,
             'sanity_lower': clipped_lower if 'clipped_lower' in locals() else None,
             'sanity_upper': clipped_upper if 'clipped_upper' in locals() else None,
@@ -1217,31 +1804,37 @@ def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_
     tendencia_pct = (factor_tendencia - 1) * 100
     direccion_tendencia = "bajada" if tendencia_pct < 0 else "subida"
     abs_tendencia = abs(tendencia_pct)
-    explicacion = f"En {dia_nombre} del {base_year}, se vendieron €{ventas_base:.0f}. "
-    explicacion += f"En el último mes de {current_year}, los {dia_nombre} han promediado €{media_reciente:.0f} "
+    items = []
+    items.append(f"Base histórica ({base_year}): €{ventas_base:.0f}.")
+    items.append(f"Media reciente ({current_year}, últimas 4 semanas): €{media_reciente:.0f}.")
     if variacion_vs_base > 0:
-        explicacion += f"(un {variacion_vs_base:.1f}% más que el año pasado). "
+        items.append(f"Variación vs año anterior: +{variacion_vs_base:.1f}%.")
     elif variacion_vs_base < 0:
-        explicacion += f"(un {abs(variacion_vs_base):.1f}% menos que el año pasado). "
+        items.append(f"Variación vs año anterior: {variacion_vs_base:.1f}%.")
     else:
-        explicacion += f"(similar al año pasado). "
+        items.append("Variación vs año anterior: sin cambio significativo.")
     if abs_tendencia > 1:
-        explicacion += f"Llevamos una {direccion_tendencia} de {abs_tendencia:.1f}% en las últimas semanas, "
+        items.append(f"Tendencia reciente: {direccion_tendencia} de {abs_tendencia:.1f}% en las últimas semanas.")
     else:
-        explicacion += f"Sin tendencia clara en las últimas semanas, "
-    explicacion += f"por lo que la predicción base para este {dia_nombre} es de €{prediccion_base:.0f} (ponderada: 40% histórico + 60% reciente ajustado por tendencia). "
+        items.append("Tendencia reciente: sin tendencia clara en las últimas semanas.")
+    items.append(f"Predicción base (ponderada): €{prediccion_base:.0f} (30% histórico + 70% reciente ajustado por tendencia).")
     if ytd_factor != 1.0:
         ytd_dir = "mejor" if ytd_factor > 1 else "peor"
         ytd_pct = abs((ytd_factor - 1) * 100)
-        explicacion += f"Ajustado por rendimiento YTD ({ytd_dir} del {ytd_pct:.1f}%). "
+        items.append(f"Ajuste YTD: {ytd_dir} {ytd_pct:.1f}%.")
     if decay_factor != 1.0:
         decay_dir = "bajada" if decay_factor < 1 else "subida"
         decay_pct = abs((decay_factor - 1) * 100)
         wom = week_of_month_custom(fecha_actual)
-        explicacion += f"Ajustado por posición en el mes (semana {wom}: {decay_dir} del {decay_pct:.1f}%). "
+        items.append(f"Ajuste por posición en el mes (semana {wom}): {decay_dir} {decay_pct:.1f}%.")
     if tipo_evento != "Día Normal":
-        explicacion += f"Ajustado por {tipo_evento.lower()}. "
-    return explicacion
+        items.append(f"Ajuste por evento: {tipo_evento}.")
+    # Construir lista HTML
+    try:
+        li_elems = ''.join([f"<li>{it}</li>" for it in items])
+        return f"<ul>{li_elems}</ul>"
+    except Exception:
+        return '\n'.join(items)
 
 def optimizar_coste_personal(df_prediccion):
     dias = list(range(7))
@@ -1647,38 +2240,17 @@ def mostrar_indicador_crecimiento():
                 # Arrow is rendered below the euros as requested.
                 sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
                 delta_formatted = f"{delta_euros:+,.0f}"
+                # Background and text colors per sign (user-specified tones)
+                if color == "#19a34a":
+                    bg_color = 'rgba(61, 213, 109, 0.2)'
+                    text_color = 'rgb(92, 228, 136)'
+                elif color == "#e03e3e":
+                    bg_color = 'rgba(213, 61, 61, 0.2)'
+                    text_color = 'rgb(228, 92, 92)'
+                else:
+                    bg_color = '#fbfdff'
+                    text_color = '#222'
                 # Refined visual: glassy card, pill for euros, SVG arrow below, subtle shadows
-                card_html = f"""
-                <style>
-                .ytd-card {{
-                    background: linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(250,250,250,0.9) 100%);
-                    padding: 10px 14px;
-                    border-radius: 14px;
-                    text-align: center;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
-                    display:inline-block;
-                    min-width:150px;
-                    box-shadow: 0 10px 30px rgba(7,12,20,0.28);
-                    backdrop-filter: blur(6px);
-                }}
-                .ytd-card .pct {{ font-size:0.92rem; color:#222; opacity:0.85; margin-bottom:6px; font-weight:600; }}
-                .ytd-card .delta {{ font-size:1.1rem; font-weight:800; color:#000; padding:10px 16px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; margin:0 auto; min-width:120px; box-shadow: 0 6px 18px rgba(2,6,23,0.06); }}
-                .ytd-card .delta.green {{ background: linear-gradient(90deg, #e9f7ee, #f6fffb); color:#000; }}
-                .ytd-card .delta.red {{ background: linear-gradient(90deg, #fff1f1, #fff7f7); color:#000; }}
-                .ytd-card .delta.neutral {{ background: #f3f6f8; color:#000; }}
-                .ytd-card .arrow {{ margin-top:8px; color: inherit; display:flex; align-items:center; justify-content:center; }}
-                .ytd-card svg {{ display:block; }}
-                @media (max-width:600px) {{
-                    .ytd-card {{ min-width:120px; padding:8px 10px; }}
-                    .ytd-card .delta {{ font-size:1rem; padding:8px 12px; min-width:100px; }}
-                }}
-                </style>
-                <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
-                  <div class="pct">{variacion_pct:+.1f}%</div>
-                  <div class="delta {sign_class}">{delta_formatted} €</div>
-                  <div class="arrow">{flecha_html}</div>
-                </div>
-                """
                 # Build flecha_html using a small inline SVG (up or down) colored to match
                 if color == "#19a34a":
                     flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 19V5" stroke="#19a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 12l7-7" stroke="#19a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
@@ -1686,12 +2258,43 @@ def mostrar_indicador_crecimiento():
                     flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 5v14" stroke="#e03e3e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 12l-7 7" stroke="#e03e3e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
                 else:
                     flecha_html = '<svg width="20" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 12h14" stroke="#9aa0a6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                card_html = f"""
+                <style>
+                .ytd-card {{
+                    background: {bg_color};
+                    padding: 10px 14px;
+                    border-radius: 14px;
+                    text-align: center;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+                    display:inline-block;
+                    min-width:150px;
+                    box-shadow: 0 10px 30px rgba(7,12,20,0.06);
+                }}
+                .ytd-card .pct {{ font-size:1.5rem; font-weight:800; margin-bottom:6px; color: {text_color}; }}
+                .ytd-card .delta {{ font-size:1.05rem; font-weight:800; color: {text_color}; padding:8px 12px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center; gap:8px; min-width:120px; }}
+                .ytd-card .arrow-text {{ font-size:1.05rem; line-height:1; color: {text_color}; }}
+                @media (max-width:600px) {{
+                    .ytd-card {{ min-width:120px; padding:8px 10px; }}
+                    .ytd-card .pct {{ font-size:1.2rem; }}
+                    .ytd-card .delta {{ font-size:0.95rem; padding:8px 10px; }}
+                }}
+                </style>
+                <div class="ytd-card" role="status" aria-label="Crecimiento YTD">
+                  <div class="pct">{variacion_pct:+.1f}%</div>
+                  <div class="delta">{delta_formatted} € <span class="arrow-text">{flecha}</span></div>
+                </div>
+                """
                 try:
                     st.markdown(card_html, unsafe_allow_html=True)
                 except Exception:
                     try:
                         # Fallback: simple centered block with similar look
-                        fallback_html = f"<div style='background:#fbfdff;padding:8px 12px;border-radius:12px;text-align:center;min-width:140px;box-shadow:0 6px 18px rgba(2,6,23,0.12)'><div style='color:#000;opacity:0.85'>{variacion_pct:+.1f}%</div><div style='font-weight:800;color:#000;padding:8px 12px;border-radius:12px;margin-top:6px'>{delta_euros:+,.0f} €</div><div style='margin-top:8px;color:{color}'>{flecha}</div></div>"
+                        fallback_html = f"""
+<div style="background:{bg_color}; padding:8px 12px; border-radius:12px; text-align:center; min-width:140px; box-shadow:0 6px 18px rgba(2,6,23,0.06); color:{text_color};">
+  <div style="font-weight:700; font-size:1.2rem; margin-bottom:4px; color:{text_color};">{variacion_pct:+.1f}%</div>
+  <div style="font-weight:800; color:{text_color}; padding:8px 12px; border-radius:12px; margin-top:0">{delta_euros:+,.0f} € <span style="margin-left:8px">{flecha}</span></div>
+</div>
+"""
                         st.markdown(fallback_html, unsafe_allow_html=True)
                     except Exception:
                         st.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
@@ -1699,7 +2302,12 @@ def mostrar_indicador_crecimiento():
                 try:
                     # Fallback: simple centered block with the same structure
                     sign_class = "green" if color == "#19a34a" else ("red" if color == "#e03e3e" else "neutral")
-                    fallback_html = f"<div style='background:#fbfdff;padding:8px 12px;border-radius:12px;text-align:center;min-width:140px;box-shadow:0 6px 18px rgba(2,6,23,0.12)'><div style='color:#000;opacity:0.8'>{variacion_pct:+.1f}%</div><div style='font-weight:800;color:#000;padding:8px 12px;border-radius:12px;margin-top:6px'>{delta_euros:+,.0f} €</div><div style='margin-top:8px;color:#000'>{flecha}</div></div>"
+                    fallback_html = f"""
+<div style="background:{bg_color}; padding:8px 12px; border-radius:12px; text-align:center; min-width:140px; box-shadow:0 6px 18px rgba(2,6,23,0.06); color:{text_color};">
+  <div style="font-weight:700; font-size:1.2rem; margin-bottom:4px; color:{text_color};">{variacion_pct:+.1f}%</div>
+  <div style="font-weight:800; color:{text_color}; padding:8px 12px; border-radius:12px; margin-top:0">{delta_euros:+,.0f} € <span style="margin-left:8px">{flecha}</span></div>
+</div>
+"""
                     st.markdown(fallback_html, unsafe_allow_html=True)
                 except Exception:
                     st.write(f"{variacion_pct:.1f}% {flecha} (Δ € {delta_euros:,.0f})")
@@ -1755,7 +2363,6 @@ with st.sidebar.form("form_venta_manual"):
         st.session_state.df_historico = df_hist.sort_index()
         guardar_datos('ventas')
         st.sidebar.success(f"Venta de €{ventas_manual:.2f} guardada/actualizada para {fecha_manual.strftime('%Y-%m-%d')}.")
-        st.rerun()
 
 with st.sidebar.expander("Ver / Editar Datos Históricos (Guardado automático)"):
     st.markdown("##### Todos los Datos de Ventas (Histórico)")
@@ -1774,7 +2381,19 @@ if uploader_eventos:
         st.session_state.eventos.update(nuevos_eventos)
         guardar_datos('eventos')
         st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_eventos)} eventos.")
-        st.rerun()
+
+# Uploader específico para partidos del FCB
+uploader_partidos = st.sidebar.file_uploader("Importar Partidos FCB (CSV/Excel)", type=['csv', 'xlsx'], help="Archivo con columnas 'Fecha' y 'Partido' (fecha puede incluir hora).")
+if uploader_partidos:
+    nuevos_partidos = procesar_archivo_partidos(uploader_partidos)
+    if nuevos_partidos:
+        # almacenar en session_state como dict fecha->descripcion
+        prev = st.session_state.get('fcb_matches', {})
+        prev.update(nuevos_partidos)
+        st.session_state.fcb_matches = prev
+        guardar_datos('partidos')
+        st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_partidos)} partidos FCB.")
+        # No forzamos rerun para evitar recálculos pesados al subir archivos pequeños
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("O añade un evento futuro (solo nombre):")
@@ -1788,7 +2407,6 @@ with st.sidebar.form("form_eventos"):
         st.session_state.eventos[fecha_str] = {'descripcion': evento_desc, 'impacto_manual_pct': evento_impacto}
         guardar_datos('eventos')
         st.sidebar.success(f"Evento '{evento_desc}' guardado para {fecha_str} con impacto {evento_impacto:+.1f}%.")
-        st.rerun()
 
 with st.sidebar.expander("Ver / Eliminar Eventos Guardados"):
     if not st.session_state.eventos:
@@ -1808,8 +2426,23 @@ with st.sidebar.expander("Ver / Eliminar Eventos Guardados"):
         if evento_a_eliminar:
             st.session_state.eventos.pop(evento_a_eliminar, None)
             guardar_datos('eventos')
-            st.rerun()
         st.dataframe(df_eventos, width='stretch')
+
+    with st.sidebar.expander("Ver / Eliminar Partidos FCB Guardados"):
+        partidos = st.session_state.get('fcb_matches', {})
+        if not partidos:
+            st.write("No hay partidos FCB guardados.")
+        else:
+            df_partidos_data = []
+            for fecha, desc in partidos.items():
+                df_partidos_data.append({'Fecha': fecha, 'Partido': desc})
+            df_partidos = pd.DataFrame(df_partidos_data).set_index('Fecha').sort_index()
+            partido_a_eliminar = st.selectbox("Selecciona un partido para eliminar", options=[""] + list(df_partidos.index), key="sel_eliminar_partido")
+            if partido_a_eliminar:
+                st.session_state.fcb_matches.pop(partido_a_eliminar, None)
+                guardar_datos('partidos')
+                st.sidebar.success(f"Partido eliminado: {partido_a_eliminar}")
+            st.dataframe(df_partidos, width='stretch')
 
 st.sidebar.header("⚠️ Administración")
 if st.sidebar.button("Reiniciar Aplicación (Borrar Datos)", type="secondary"):
@@ -1825,15 +2458,47 @@ if st.session_state.get("show_delete_modal", False):
             if st.button("Borrar Definitivamente", type="primary", key="confirm_delete_btn"): 
                 if password == "1494":
                     try:
-                        for file in ARCHIVOS_PERSISTENCIA.values():
-                            if os.path.exists(file):
-                                os.remove(file)
+                        # Eliminar archivos persistentes usando rutas absolutas cuando sea posible
+                        proyecto_dir = os.path.dirname(os.path.abspath(__file__))
+                        for rel in ARCHIVOS_PERSISTENCIA.values():
+                            try:
+                                path = os.path.join(proyecto_dir, rel)
+                                if os.path.exists(path):
+                                    os.remove(path)
+                            except Exception:
+                                # Intento de borrado con la ruta relativa como fallback
+                                try:
+                                    if os.path.exists(rel):
+                                        os.remove(rel)
+                                except Exception:
+                                    pass
+
+                        # Limpiar claves de session_state relevantes
                         keys_to_delete = ['df_historico', 'eventos', 'datos_cargados', 'df_prediccion', 'show_delete_modal', 'last_calculated_date']
                         for key in keys_to_delete:
                             if key in st.session_state:
                                 del st.session_state[key]
+
+                        # Re-inicializar valores en session_state para evitar AttributeError
+                        st.session_state.df_historico = pd.DataFrame(columns=['ventas'])
+                        st.session_state.df_historico.index.name = 'fecha'
+                        st.session_state.eventos = {}
+                        # Asegurar que los partidos FCB en sesión también se limpien
+                        if 'fcb_matches' in st.session_state:
+                            del st.session_state['fcb_matches']
+                        st.session_state.fcb_matches = {}
+                        st.session_state.datos_cargados = False
+                        st.session_state.show_delete_modal = False
+                        st.session_state.last_calculated_date = None
+                        st.session_state.df_prediccion = pd.DataFrame()
+
                         st.success("¡Datos borrados con éxito! La aplicación se reiniciará.")
-                        st.balloons(); st.rerun()
+                        st.balloons()
+                        # Forzar reinicio para refrescar la UI inmediatamente tras la limpieza
+                        try:
+                            st.rerun()
+                        except Exception:
+                            pass
                     except Exception as e:
                         st.error(f"Error al borrar archivos: {e}")
                 else:
@@ -1841,7 +2506,6 @@ if st.session_state.get("show_delete_modal", False):
         with col2:
             if st.button("Cancelar", key="cancel_delete_btn"):
                 st.session_state.show_delete_modal = False
-                st.rerun()
     st.markdown("---")
 
 # =============================================================================
@@ -1890,7 +2554,7 @@ if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabl
     else:
         st.session_state.df_prediccion = df_prediccion 
         st.session_state.last_calculated_date = fecha_inicio_seleccionada
-        st.rerun() 
+        # Previously forced a rerun; now we avoid automatic reruns to keep UI responsive.
 
 if not calculo_disponible:
     st.error("El botón de cálculo está desactivado. Por favor, sube datos históricos en la barra lateral.")
@@ -1936,23 +2600,129 @@ if display_results:
     st.success(f"Predicción generada con éxito para la semana del {fecha_formateada}.")
     
     st.subheader("1. Predicción de Ventas Semanal")
+    # --- Nuevo: resumen de impacto de partidos FCB ---
+    try:
+        fcb_matches = st.session_state.get('fcb_matches', {})
+        df_h = st.session_state.get('df_historico', pd.DataFrame())
+        impacto_rows = []
+        for fecha_str, val in (fcb_matches or {}).items():
+            try:
+                fecha_dt = pd.to_datetime(fecha_str)
+            except Exception:
+                continue
+            # buscar ventas en la fecha del partido (si existe)
+            if fecha_dt not in df_h.index:
+                continue
+            ventas_partido = float(df_h.loc[fecha_dt, 'ventas'])
+            # buscar hasta 3 previos mismos weekday en ese año excluyendo partidos/festivos/vísperas
+            year = fecha_dt.year
+            occ_same = df_h[(df_h.index.year == year) & (df_h.index.weekday == fecha_dt.weekday())].sort_index()
+            occ_prev = occ_same[occ_same.index < fecha_dt]
+            prev_filtered = []
+            for d in reversed(list(occ_prev.index)):
+                d_str = d.strftime('%Y-%m-%d')
+                if d_str in fcb_matches:
+                    continue
+                if es_festivo(d) or es_vispera_de_festivo(d):
+                    continue
+                prev_filtered.append(float(df_h.loc[d, 'ventas']))
+                if len(prev_filtered) >= 3:
+                    break
+            if len(prev_filtered) == 0:
+                continue
+            mean_prev = float(np.mean(prev_filtered))
+            pct = (ventas_partido - mean_prev) / mean_prev if mean_prev > 0 else 0.0
+            partido_desc = None
+            hora_desc = None
+            if isinstance(val, dict):
+                partido_desc = val.get('partido')
+                hora_desc = val.get('hora')
+            else:
+                partido_desc = val
+            impacto_rows.append({
+                'fecha': fecha_dt,
+                'partido': partido_desc,
+                'Hora': hora_desc,
+                'ventas_partido': ventas_partido,
+                'mean_prev': mean_prev,
+                'pct_change': pct
+            })
+        if impacto_rows:
+            df_imp = pd.DataFrame(impacto_rows).sort_values('pct_change', ascending=False)
+            # renombrar y limpiar columnas para presentación
+            df_imp = df_imp.rename(columns={'mean_prev': 'Media previa', 'pct_change': 'Impacto del partido'})
+            if 'prev_samples' in df_imp.columns:
+                df_imp = df_imp.drop(columns=['prev_samples'])
+            with st.expander('Partidos FCB con mayor impacto histórico (ordenados)', expanded=True):
+                st.markdown('Resumen de partidos detectados y su impacto relativo sobre ventas (comparado con media de hasta 3 días previos same-weekday).')
+                # filtros
+                cols = st.columns([1,1,1,1])
+                with cols[0]:
+                    top_n = st.number_input('Mostrar top N', min_value=1, max_value=50, value=10, step=1)
+                with cols[1]:
+                    sign_filter = st.selectbox('Tipo', options=['Todos','Aumento','Disminución'])
+                with cols[2]:
+                    # Text input para búsqueda en vivo; usamos session_state + on_change
+                    def _fcb_search_changed():
+                        # callback vacío: la rerun ocurre automáticamente al cambiar el valor
+                        return None
+                    st.text_input('Buscar equipo', value='', placeholder='p.ej. Granada', key='fcb_search', on_change=_fcb_search_changed)
+                df_show = df_imp.copy()
+                # aplicar filtro por texto si se ha proporcionado búsqueda
+                try:
+                    search_team = st.session_state.get('fcb_search', '')
+                    if search_team and str(search_team).strip() != '':
+                        term = str(search_team).strip().lower()
+                        if 'partido' in df_show.columns:
+                            df_show = df_show[df_show['partido'].astype(str).str.lower().str.contains(term)]
+                except Exception:
+                    pass
+                if sign_filter == 'Aumento':
+                    df_show = df_show[df_show['Impacto del partido'] > 0]
+                elif sign_filter == 'Disminución':
+                    df_show = df_show[df_show['Impacto del partido'] < 0]
+                df_show = df_show.head(int(top_n))
+                # Asegurar columna Hora solo si hay al menos una hora conocida;
+                # si no hay ninguna hora, omitimos la columna para evitar valores N/A.
+                if 'Hora' in df_show.columns:
+                    if df_show['Hora'].notna().any():
+                        df_show['Hora'] = df_show['Hora'].fillna('N/A')
+                    else:
+                        df_show = df_show.drop(columns=['Hora'])
+                # format
+                try:
+                    # asegurar orden de columnas para la vista, incluyendo Hora
+                    display_cols = [c for c in ['fecha', 'partido', 'Hora', 'ventas_partido', 'Media previa', 'Impacto del partido'] if c in df_show.columns]
+                    df_show = df_show[display_cols]
+                    sty = df_show.style.format({
+                        'fecha': lambda d: d.strftime('%Y-%m-%d'),
+                        'ventas_partido': '€{:,.2f}',
+                        'Media previa': '€{:,.2f}',
+                        'Impacto del partido': '{:+.1%}'
+                    })
+                    st.dataframe(sty, width='stretch')
+                except Exception:
+                    st.dataframe(df_show, width='stretch')
+    except Exception:
+        pass
     df_prediccion_display = df_prediccion.reset_index()
     df_prediccion_display['dia_semana'] = df_prediccion_display['dia_semana'] + ' ' + df_prediccion_display['fecha'].dt.strftime('%d')
     df_prediccion_display = df_prediccion_display.rename(columns={
         'ventas_reales_current_year': 'Ventas Reales',
-        'base_historica': 'Base Histórica (40%)',
-        'media_reciente_current_year': 'Media Reciente (60%)'
+        'base_historica': 'Base Histórica (30%)',
+        'media_reciente_current_year': 'Media Reciente (70%)'
     })
     PLACEHOLDER_STR = ' - '
     df_prediccion_display['Ventas Reales'] = df_prediccion_display['Ventas Reales'].fillna(PLACEHOLDER_STR)
-    def build_google_query(fecha_base_str):
-        if fecha_base_str is None:
-            return None
-        fecha_base = pd.to_datetime(fecha_base_str)
-        fecha_txt = fecha_base.strftime('%d/%m/%Y')
-        query = f'{fecha_txt} jugó el Futbol Club Barcelona'
-        return "https://www.google.com/search?q=" + urllib.parse.quote(query)
-    df_prediccion_display['Buscar partido'] = df_prediccion_display['fecha_base_historica'].apply(build_google_query)
+    # Columna FCB AÑO BASE: porcentaje de incremento asociado al partido en el año base
+    def format_fcb_pct(x):
+        try:
+            if x is None or (isinstance(x, float) and np.isnan(x)):
+                return PLACEHOLDER_STR
+            return f"{float(x):.1f}%"
+        except Exception:
+            return PLACEHOLDER_STR
+    df_prediccion_display['FCB AÑO BASE'] = df_prediccion_display.get('fcb_pct_base', None).apply(format_fcb_pct) if 'fcb_pct_base' in df_prediccion_display.columns else PLACEHOLDER_STR
     def flag_festivo(fecha_dt):
         return fecha_dt in festivos_es or fecha_dt.strftime('%Y-%m-%d') in st.session_state.eventos
     def flag_vispera(fecha_dt):
@@ -1960,12 +2730,12 @@ if display_results:
         return flag_festivo(siguiente)
     df_prediccion_display['es_festivo'] = df_prediccion_display['fecha'].apply(flag_festivo)
     df_prediccion_display['es_vispera'] = df_prediccion_display['fecha'].apply(flag_vispera)
-    # Construir visualización para 'Base Histórica (40%)':
+    # Construir visualización para 'Base Histórica (30%)':
     def format_base_hist(row):
         # The dataframe may have been renamed earlier; accept either key name
         base_val = row.get('base_historica', None)
         if base_val is None:
-            base_val = row.get('Base Histórica (40%)', None)
+            base_val = row.get('Base Histórica (30%)', None)
         fecha_base = row.get('fecha_base_historica', None)
         prev = row.get('prev_vals', None)
         # determinar si la fecha_base era festivo o víspera
@@ -2008,7 +2778,7 @@ if display_results:
 
     # Aplicar formato a la columna de base histórica (crear/actualizar)
     # Mantener valor numérico para la columna, para que el grid la alinee como número
-    df_prediccion_display['Base Histórica (40%)'] = df_prediccion_display.apply(format_base_hist, axis=1).astype('float64')
+    df_prediccion_display['Base Histórica (30%)'] = df_prediccion_display.apply(format_base_hist, axis=1).astype('float64')
 
     # Determinar si debemos resaltar en amarillo la celda de Base Histórica
     def needs_base_highlight(row):
@@ -2047,7 +2817,7 @@ if display_results:
     advanced_cols = ['factor_tendencia', 'impacto_evento', 'ytd_factor', 'decay_factor']
     show_advanced = st.checkbox("Mostrar columnas avanzadas (tendencia, impacto, YTD, decay)", value=False)
 
-    base_cols = ['dia_semana', 'evento', 'Estimación', 'Base Histórica (40%)', 'Media Reciente (60%)', 'Buscar partido']
+    base_cols = ['dia_semana', 'evento', 'Estimación', 'Base Histórica (30%)', 'Media Reciente (70%)', 'FCB AÑO BASE']
     if has_reales:
         col_order = ['dia_semana', 'evento', 'Estimación', 'Ventas Reales', 'Diferencia_display'] + base_cols[3:]
         reales_numeric = pd.to_numeric(df_prediccion_display['Ventas Reales'], errors='coerce')
@@ -2057,9 +2827,9 @@ if display_results:
         col_order = base_cols
     # Añadir columnas avanzadas si el usuario lo solicita
     if show_advanced:
-        # insert advanced columns justo después de 'Media Reciente (60%)' si existe
-        if 'Media Reciente (60%)' in col_order:
-            insert_idx = col_order.index('Media Reciente (60%)') + 1
+        # insert advanced columns justo después de 'Media Reciente (70%)' si existe
+        if 'Media Reciente (70%)' in col_order:
+            insert_idx = col_order.index('Media Reciente (70%)') + 1
             for ac in advanced_cols:
                 col_order.insert(insert_idx, ac)
                 insert_idx += 1
@@ -2105,13 +2875,7 @@ if display_results:
                 styles.append(['text-align: center'] * len(df.columns))
         return pd.DataFrame(styles, index=df.index, columns=df.columns)
 
-    column_config = {
-        'Buscar partido': st.column_config.LinkColumn(
-            "Buscar partido",
-            help="Abre Google con la búsqueda: 'DD/MM/YYYY hubo partido del Futbol Club Barcelona o España'",
-            display_text="Buscar"
-        )
-    }
+    # ya no mostramos columna 'Buscar partido'
 
     # Para eliminar la columna de numeración, usamos 'dia_semana' como índice de visualización
     display_df = df_prediccion_display.set_index('dia_semana') if 'dia_semana' in df_prediccion_display.columns else df_prediccion_display.copy()
@@ -2136,8 +2900,8 @@ if display_results:
         'Ventas Reales': lambda x: PLACEHOLDER_STR if x == PLACEHOLDER_STR else safe_currency(x),
         # These columns sometimes already contain formatted strings (e.g. '€123.45*').
         # If so, leave them as-is; otherwise format as currency.
-        'Base Histórica (40%)': lambda x: x if isinstance(x, str) and (x.startswith('€') or x.strip() in ['-','- ']) else safe_currency(x),
-        'Media Reciente (60%)': lambda x: x if isinstance(x, str) and x.startswith('€') else safe_currency(x),
+        'Base Histórica (30%)': lambda x: x if isinstance(x, str) and (x.startswith('€') or x.strip() in ['-','- ']) else safe_currency(x),
+        'Media Reciente (70%)': lambda x: x if isinstance(x, str) and x.startswith('€') else safe_currency(x),
         'factor_tendencia': safe_number,
         'impacto_evento': safe_number,
         'ytd_factor': safe_number,
@@ -2157,16 +2921,16 @@ if display_results:
         # Alinear índices y columnas con display_df (que usa 'dia_semana' como índice)
         styles_df.index = display_df.index
         styles_df = styles_df.reindex(columns=display_df.columns)
-        # Asegurar que la columna 'Base Histórica (40%)' esté alineada a la derecha por defecto
-        if 'Base Histórica (40%)' in styles_df.columns:
-            styles_df['Base Histórica (40%)'] = ['text-align: right'] * len(styles_df)
-        # Aplicar resaltado amarillo solo a la celda 'Base Histórica (40%)' cuando proceda
-        if 'Base Histórica (40%)' in styles_df.columns and 'base_historica_flag' in df_prediccion_display.columns:
+        # Asegurar que la columna 'Base Histórica (30%)' esté alineada a la derecha por defecto
+        if 'Base Histórica (30%)' in styles_df.columns:
+            styles_df['Base Histórica (30%)'] = ['text-align: right'] * len(styles_df)
+        # Aplicar resaltado amarillo solo a la celda 'Base Histórica (30%)' cuando proceda
+        if 'Base Histórica (30%)' in styles_df.columns and 'base_historica_flag' in df_prediccion_display.columns:
             try:
                 mask_flag = df_prediccion_display.set_index('dia_semana')['base_historica_flag'] if 'dia_semana' in df_prediccion_display.columns else df_prediccion_display['base_historica_flag']
                 for idx, flag in mask_flag.items():
                     if flag and idx in styles_df.index:
-                        styles_df.at[idx, 'Base Histórica (40%)'] = 'background-color: #fff3b0; text-align: right'
+                        styles_df.at[idx, 'Base Histórica (30%)'] = 'background-color: #fff3b0; text-align: right'
                         # también centrar el icono de la columna visual
                         if 'Base Indicador' in styles_df.columns:
                             styles_df.at[idx, 'Base Indicador'] = 'text-align: center; background-color: transparent'
@@ -2182,10 +2946,10 @@ if display_results:
     except Exception:
         pass
 
-    # Asegurar centrado específico para la columna 'Base Histórica (40%)' (compatibilidad)
+    # Asegurar centrado específico para la columna 'Base Histórica (30%)' (compatibilidad)
     try:
-        if 'Base Histórica (40%)' in display_df.columns:
-            style = style.set_properties(subset=['Base Histórica (40%)'], **{'text-align': 'center'})
+        if 'Base Histórica (30%)' in display_df.columns:
+            style = style.set_properties(subset=['Base Histórica (30%)'], **{'text-align': 'center'})
     except Exception:
         pass
 
@@ -2199,10 +2963,105 @@ if display_results:
 
     # Mostrar la tabla con el estilo generado; evitamos forzar HTML/unsafe rendering.
     try:
-        st.dataframe(style, width='stretch', column_config=column_config)
+        st.dataframe(style, width='stretch')
     except Exception:
         # Fallback si hay problemas con Styler: mostrar el DataFrame plano
         st.write(display_df)
+    # --- Nueva tabla: detalles de la Base Histórica usada por fila ---
+    try:
+        # Construir DataFrame que mapea cada fila de la predicción a su fecha base exacta
+        df_base_details = df_prediccion.reset_index()[['dia_semana', 'fecha', 'fecha_base_historica', 'ventas_base_historica']].copy()
+        # Formatear columnas: fecha base, día de la semana y ventas históricas
+        def fmt_base_date(x):
+            try:
+                if x is None or str(x) in ('', 'None'):
+                    return PLACEHOLDER_STR
+                d = pd.to_datetime(x)
+                return d.strftime('%Y-%m-%d')
+            except Exception:
+                return PLACEHOLDER_STR
+
+        def weekday_name(x):
+            try:
+                if x is None or str(x) in ('', 'None'):
+                    return PLACEHOLDER_STR
+                d = pd.to_datetime(x)
+                # use Spanish day names mapping if available
+                return DIAS_SEMANA[d.weekday()]
+            except Exception:
+                return PLACEHOLDER_STR
+
+        def fmt_sales(x):
+            try:
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return PLACEHOLDER_STR
+                return f"€{float(x):,.2f}"
+            except Exception:
+                return PLACEHOLDER_STR
+
+        df_base_details['Fecha Base (Año Anterior)'] = df_base_details['fecha_base_historica'].apply(fmt_base_date)
+        df_base_details['Día Base'] = df_base_details['fecha_base_historica'].apply(weekday_name)
+        df_base_details['Ventas Base (€)'] = df_base_details['ventas_base_historica'].apply(fmt_sales)
+        # Añadir columnas de evento y partido FCB (mostrar descripción si existe)
+        eventos_mask = st.session_state.get('eventos', {})
+        fcb_mask = st.session_state.get('fcb_matches', {})
+        def evt_desc(x):
+            try:
+                if x is None or str(x) in ('', 'None'):
+                    return PLACEHOLDER_STR
+                k = pd.to_datetime(x).strftime('%Y-%m-%d')
+                ev = eventos_mask.get(k)
+                if ev:
+                    # si hay descripción preferirla
+                    if isinstance(ev, dict):
+                        return ev.get('descripcion', str(ev))
+                    return str(ev)
+                return PLACEHOLDER_STR
+            except Exception:
+                return PLACEHOLDER_STR
+
+        def fcb_desc(x):
+            try:
+                if x is None or str(x) in ('', 'None'):
+                    return PLACEHOLDER_STR
+                k = pd.to_datetime(x).strftime('%Y-%m-%d')
+                m = fcb_mask.get(k)
+                if m is None:
+                    return PLACEHOLDER_STR
+                # soportar dicts con partido/hora o strings
+                if isinstance(m, dict):
+                    partido = m.get('partido', '')
+                    hora = m.get('hora', None)
+                    if hora:
+                        return f"{partido} - {hora}"
+                    return str(partido)
+                return str(m)
+            except Exception:
+                return PLACEHOLDER_STR
+
+        df_base_details['Hubo Evento'] = df_base_details['fecha_base_historica'].apply(evt_desc)
+        df_base_details['Hubo Partido FCB'] = df_base_details['fecha_base_historica'].apply(fcb_desc)
+        # Si ambas columnas no contienen información útil (todas filas vacías), no las mostramos
+        if df_base_details['Hubo Evento'].eq(PLACEHOLDER_STR).all() and df_base_details['Hubo Partido FCB'].eq(PLACEHOLDER_STR).all():
+            df_base_details = df_base_details[['dia_semana', 'Fecha Base (Año Anterior)', 'Día Base', 'Ventas Base (€)']]
+        else:
+            # construir orden final incluyendo solo las columnas necesarias
+            cols_final = ['dia_semana', 'Fecha Base (Año Anterior)', 'Día Base', 'Ventas Base (€)']
+            if not df_base_details['Hubo Evento'].eq(PLACEHOLDER_STR).all():
+                cols_final.append('Hubo Evento')
+            if not df_base_details['Hubo Partido FCB'].eq(PLACEHOLDER_STR).all():
+                cols_final.append('Hubo Partido FCB')
+            df_base_details = df_base_details[cols_final]
+        df_base_details = df_base_details.set_index('dia_semana')
+        st.subheader('2. Detalle: Origen de la Base Histórica (año anterior)')
+        st.markdown("""<ul>
+        <li>Para cada fila de la predicción, se muestra la fecha exacta del año anterior que se usó como base.</li>
+        <li>Mostramos el día de la semana que cayó y las ventas registradas aquel día.</li>
+        <li>También se indica si hubo evento o partido del FCB en la fecha base.</li>
+        </ul>""", unsafe_allow_html=True)
+        st.dataframe(df_base_details, width='stretch')
+    except Exception:
+        pass
     
     with st.expander("Ver detalles del cálculo de predicción"):
         details_text = f"""
@@ -2216,36 +3075,261 @@ if display_results:
         - **Diferencia**: Diferencia entre Ventas Reales y Predicción (con flecha ↑/↓ y color verde/rojo).
         """
         details_text += f"""
-        - **Base Histórica (40%)**: Si el día es festivo o víspera, se compara con la misma fecha exacta del año **{BASE_YEAR}**. El resto usa la media mensual del día de semana del año **{BASE_YEAR}**, excluyendo festivos y eventos.
-        - **Media Reciente (60%)**: Media de las últimas 4 semanas para ese mismo día de la semana en el año **{CURRENT_YEAR}**.
+        - **Base Histórica (30%)**: Si el día es festivo o víspera, se compara con la misma fecha exacta del año **{BASE_YEAR}**. El resto usa la media mensual del día de semana del año **{BASE_YEAR}**, excluyendo festivos y eventos.
+        - **Media Reciente (70%)**: Media de las últimas 4 semanas para ese mismo día de la semana en el año **{CURRENT_YEAR}**.
         - **Ajustes**: factor_tendencia, impacto_evento, ytd_factor, decay_factor.
         """
         st.markdown(details_text)
         for fecha, row in df_prediccion.iterrows():
-            st.markdown(f"**{row['dia_semana']} ({fecha.strftime('%d/%m/%Y')}):** {row['explicacion']}")
-            # Mostrar valores previos usados para cálculos y si se aplicó recorte de sanity
-            try:
-                if row.get('prev_vals') and row.get('prev_vals') != '[]':
-                    st.markdown(f"- Prev vals (últimas ocurrencias usadas): {row.get('prev_vals')}")
-            except Exception:
-                pass
-            try:
-                # Mostrar nota cuando la Base Histórica fue resaltada en amarillo
+            title = f"{row['dia_semana']} ({fecha.strftime('%d/%m/%Y')})"
+            with st.expander(title):
+                expl = row.get('explicacion', PLACEHOLDER_STR)
+                try:
+                    # explicacion puede ser HTML (<ul>...</ul>) o texto plano
+                    if isinstance(expl, str) and expl.strip().startswith('<ul'):
+                        st.markdown(f"**Explicación:**<br>" + expl, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"**Explicación:** {expl}")
+                except Exception:
+                    st.markdown(f"**Explicación:** {expl}")
+                # Mostrar valores previos usados para cálculos
+                try:
+                    if row.get('prev_vals') and row.get('prev_vals') != '[]':
+                        st.markdown(f"- Prev vals (últimas ocurrencias usadas): {row.get('prev_vals')}")
+                except Exception:
+                    pass
+
+                # Nota si la base histórica fue resaltada
                 try:
                     display_row = df_prediccion_display[df_prediccion_display['fecha'] == fecha]
                     if not display_row.empty and bool(display_row.iloc[0].get('base_historica_flag')):
-                        st.markdown("- Nota: la celda 'Base Histórica (40%)' está resaltada en amarillo porque la fecha base del año anterior fue festivo/víspera; se muestra la media de las últimas ocurrencias similares en su lugar.")
+                        st.markdown("- Nota: la celda 'Base Histórica (30%)' está resaltada en amarillo porque la fecha base del año anterior fue festivo/víspera; se muestra la media de las últimas ocurrencias similares en su lugar.")
                 except Exception:
                     pass
-            except Exception:
-                pass
-            try:
-                if row.get('sanity_clipped'):
-                    low = row.get('sanity_lower')
-                    high = row.get('sanity_upper')
-                    st.markdown(f"- Nota: Valor recortado a rango realista [{low:.0f} - {high:.0f}] (±30%).")
-            except Exception:
-                pass
+
+                # Nota de sanity
+                try:
+                    if row.get('sanity_clipped'):
+                        low = row.get('sanity_lower')
+                        high = row.get('sanity_upper')
+                        st.markdown(f"- Nota: Valor recortado a rango realista [{low:.0f} - {high:.0f}] (±30%).")
+                except Exception:
+                    pass
+
+                # Información de partido FCB: intentar extraer rival y hora
+                try:
+                    fcb_today = row.get('fcb_match_today') if 'fcb_match_today' in row else None
+                    fcb_base = row.get('fcb_match_base') if 'fcb_match_base' in row else None
+                    fcb_pct = row.get('fcb_pct_base') if 'fcb_pct_base' in row else None
+
+                    def parse_match(s):
+                        if not s or s in (PLACEHOLDER_STR, '-', None):
+                            return None, None
+                        # Si es un dict con partido/hora, extraer directamente
+                        if isinstance(s, dict):
+                            return s.get('partido'), s.get('hora')
+                        txt = str(s)
+                        # buscar hora hh:mm
+                        m = re.search(r"(\d{1,2}:\d{2})", txt)
+                        hora = m.group(1) if m else None
+                        # extraer rival: texto sin la hora y sin palabras comunes
+                        rival = txt
+                        if hora:
+                            rival = re.sub(r"\s*[-@|]\s*\d{1,2}:\d{2}$", '', rival)
+                            rival = re.sub(r"\s*\d{1,2}:\d{2}$", '', rival)
+                        # normalizar separadores
+                        rival = rival.replace(' vs ', ' vs ').replace(' - ', ' - ').strip()
+                        return rival, hora
+
+                    if fcb_today:
+                        rival, hora = parse_match(fcb_today)
+                        if rival:
+                            st.markdown(f"- Partido (hoy): {rival}")
+                        if hora:
+                            st.markdown(f"  - Hora: {hora}")
+                    if fcb_base:
+                        rival_b, hora_b = parse_match(fcb_base)
+                        if rival_b:
+                            st.markdown(f"- Partido (año base): {rival_b}")
+                        if hora_b:
+                            st.markdown(f"  - Hora: {hora_b}")
+                    if fcb_pct is not None and fcb_pct != ' - ':
+                        try:
+                            st.markdown(f"- FCB AÑO BASE: {float(fcb_pct):.1f}%")
+                        except Exception:
+                            st.markdown(f"- FCB AÑO BASE: {fcb_pct}")
+                except Exception:
+                    pass
+                    try:
+                        audit_df = generar_informe_audit(fecha, st.session_state.df_historico, CURRENT_YEAR, row.get('ytd_factor', 1.0))
+                        if not audit_df.empty:
+                            # Separar ventas por año y resumen
+                            years_mask = audit_df.index.to_series().apply(lambda x: isinstance(x, (int, np.integer)))
+                            df_years = audit_df[years_mask].copy()
+                            df_summary = audit_df[~years_mask].copy()
+
+                            if not df_years.empty:
+                                mean_val = None
+                                if 'Value' in df_summary.columns and 'Mean' in df_summary.index:
+                                    try:
+                                        mean_val = float(df_summary.loc['Mean','Value'])
+                                    except Exception:
+                                        mean_val = None
+
+                                def color_sales(val):
+                                    try:
+                                        v = float(val)
+                                    except Exception:
+                                        return ''
+                                    if mean_val is None:
+                                        return ''
+                                    if v > mean_val:
+                                        return 'color: green'
+                                    elif v < mean_val:
+                                        return 'color: red'
+                                    else:
+                                        return ''
+
+                                st.markdown("**Informe histórico por año:**")
+                                # Construir DataFrame de estilos para las ventas por año
+                                try:
+                                    styles_years = pd.DataFrame('', index=df_years.index, columns=df_years.columns)
+                                    for idx_row in df_years.index:
+                                        styles_years.loc[idx_row, 'Ventas'] = color_sales(df_years.loc[idx_row, 'Ventas'])
+                                    sty = df_years.style.format({'Ventas': '€{:,.2f}'}).apply(lambda _: styles_years, axis=None)
+                                except Exception:
+                                    sty = df_years.style.format({'Ventas': '€{:,.2f}'})
+                                st.dataframe(sty, width='stretch')
+
+                            # Mostrar las últimas N ocurrencias relacionadas con los cálculos
+                            try:
+                                N = 4
+                                target_wd = fecha.weekday()
+
+                                # Mostrar una sola tabla combinada con las últimas N ocurrencias del AÑO ACTUAL
+                                # y las correspondientes del AÑO ANTERIOR (Base Histórica), además del % de cambio.
+                                try:
+                                    current_year = fecha.year
+                                    base_year = fecha.year - 1
+
+                                    # Preparar datos año actual
+                                    df_curr_year = st.session_state.df_historico[st.session_state.df_historico.index.year == current_year].copy()
+                                    occ_curr = df_curr_year[df_curr_year.index.weekday == target_wd].sort_index()
+                                    occ_curr_before = occ_curr[occ_curr.index < fecha]
+                                    last_curr = occ_curr_before['ventas'].iloc[-N:]
+
+                                    # Preparar datos año base (excluyendo festivos y eventos) y siempre tomar
+                                    # las ocurrencias anteriores a la fecha equivalente en el año base.
+                                    df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
+                                    festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
+                                    eventos_mask = st.session_state.get('eventos', {})
+                                    mask_no_f = ~df_base_year.index.isin(festivos_b)
+                                    mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
+                                    df_clean = df_base_year[mask_no_f & mask_no_e]
+                                    occ_base = df_clean[df_clean.index.weekday == target_wd].sort_index()
+                                    # Fecha de referencia en el año base (aunque no exista como fila)
+                                    try:
+                                        fecha_base_ref = fecha.replace(year=base_year)
+                                    except Exception:
+                                        fecha_base_ref = pd.Timestamp(base_year, fecha.month, fecha.day)
+                                    occ_base_before = occ_base[occ_base.index < fecha_base_ref]
+                                    last_base = occ_base_before['ventas'].iloc[-N:]
+
+                                    # Si no hay datos suficientes, informar al usuario
+                                    if (last_curr.empty and last_base.empty):
+                                        st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {current_year} ni en {base_year} antes de la fecha de referencia.)")
+                                    else:
+                                        # Construir tabla combinada; invertimos para mostrar de más reciente a más antiguo
+                                        curr_dates = list(last_curr.index)[::-1]
+                                        curr_vals = list(last_curr.values)[::-1]
+                                        base_dates = list(last_base.index)[::-1]
+                                        base_vals = list(last_base.values)[::-1]
+                                        max_len = max(len(curr_vals), len(base_vals))
+                                        rows = []
+                                        for i in range(max_len):
+                                            c_date = curr_dates[i] if i < len(curr_dates) else pd.NaT
+                                            c_val = curr_vals[i] if i < len(curr_vals) else np.nan
+                                            b_date = base_dates[i] if i < len(base_dates) else pd.NaT
+                                            b_val = base_vals[i] if i < len(base_vals) else np.nan
+                                            if not (pd.isna(b_val) or b_val == 0):
+                                                pct = (c_val - b_val) / b_val * 100.0
+                                            else:
+                                                pct = np.nan
+                                            rows.append({
+                                                'fecha_actual': c_date,
+                                                'ventas_actual': c_val,
+                                                'fecha_anterior': b_date,
+                                                'ventas_anterior': b_val,
+                                                'pct_change': pct
+                                            })
+
+                                        df_comp = pd.DataFrame(rows)
+                                        # Formatear columnas
+                                        try:
+                                            df_comp['fecha_actual'] = pd.to_datetime(df_comp['fecha_actual'])
+                                        except Exception:
+                                            pass
+                                        try:
+                                            df_comp['fecha_anterior'] = pd.to_datetime(df_comp['fecha_anterior'])
+                                        except Exception:
+                                            pass
+
+                                        st.markdown(f"**Comparación últimas {N} ocurrencias — año {current_year} vs {base_year}:**")
+                                        # Usamos el DataFrame numérico para formatear y colorear la columna pct_change
+                                        try:
+                                            sty = df_comp.style.format({
+                                                'fecha_actual': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
+                                                'fecha_anterior': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
+                                                'ventas_actual': '€{:,.2f}',
+                                                'ventas_anterior': '€{:,.2f}',
+                                                'pct_change': '{:+.1f}%'
+                                            })
+                                            def color_pct(val):
+                                                try:
+                                                    v = float(val)
+                                                except Exception:
+                                                    return ''
+                                                return 'color: green' if v > 0 else ('color: red' if v < 0 else '')
+                                            # `Styler.applymap` está deprecado; usar `Styler.map` en su lugar
+                                            sty = sty.map(lambda v: 'color: green' if (isinstance(v, (int, float)) and v > 0) else ('color: red' if (isinstance(v, (int, float)) and v < 0) else ''), subset=['pct_change'])
+                                            st.dataframe(sty, width='stretch')
+                                        except Exception:
+                                            # Fallback: format as strings and show without extra styling
+                                            df_comp_display = df_comp.copy()
+                                            df_comp_display['ventas_actual'] = df_comp_display['ventas_actual'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                            df_comp_display['ventas_anterior'] = df_comp_display['ventas_anterior'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
+                                            df_comp_display['pct_change'] = df_comp_display['pct_change'].map(lambda x: f"{x:+.1f}%" if not pd.isna(x) else "")
+                                            st.dataframe(df_comp_display, width='stretch')
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+
+                            if not df_summary.empty:
+                                # Colorear CV/weights para visibilidad
+                                def color_summary(val, idx):
+                                    try:
+                                        v = float(val)
+                                    except Exception:
+                                        return ''
+                                    if idx == 'CV':
+                                        return 'color: red' if v > 0.3 else 'color: green'
+                                    if 'Peso' in idx:
+                                        return 'color: green' if v >= 0.8 else ''
+                                    return ''
+
+                                st.markdown("**Resumen estadístico:**")
+                                # df_summary tiene índice Metric y columna Value
+                                try:
+                                    styles_summary = pd.DataFrame('', index=df_summary.index, columns=df_summary.columns)
+                                    for idx in df_summary.index:
+                                        styles_summary.loc[idx, 'Value'] = color_summary(df_summary.loc[idx, 'Value'], idx)
+                                    sty2 = df_summary.style.format({'Value': '{:,.2f}'}).apply(lambda _: styles_summary, axis=None)
+                                except Exception:
+                                    sty2 = df_summary.style.format({'Value': '{:,.2f}'})
+                                st.dataframe(sty2, width='stretch')
+                    except Exception:
+                        pass
             try:
                 audit_df = generar_informe_audit(fecha, st.session_state.df_historico, CURRENT_YEAR, row.get('ytd_factor', 1.0))
                 if not audit_df.empty:
@@ -2256,164 +3340,6 @@ if display_results:
 
                     if not df_years.empty:
                         mean_val = None
-                        if 'Value' in df_summary.columns and 'Mean' in df_summary.index:
-                            try:
-                                mean_val = float(df_summary.loc['Mean','Value'])
-                            except Exception:
-                                mean_val = None
-
-                        def color_sales(val):
-                            try:
-                                v = float(val)
-                            except Exception:
-                                return ''
-                            if mean_val is None:
-                                return ''
-                            if v > mean_val:
-                                return 'color: green'
-                            elif v < mean_val:
-                                return 'color: red'
-                            else:
-                                return ''
-
-                        st.markdown("**Informe histórico por año:**")
-                        # Construir DataFrame de estilos para las ventas por año
-                        try:
-                            styles_years = pd.DataFrame('', index=df_years.index, columns=df_years.columns)
-                            for idx_row in df_years.index:
-                                styles_years.loc[idx_row, 'Ventas'] = color_sales(df_years.loc[idx_row, 'Ventas'])
-                            sty = df_years.style.format({'Ventas': '€{:,.2f}'}).apply(lambda _: styles_years, axis=None)
-                        except Exception:
-                            sty = df_years.style.format({'Ventas': '€{:,.2f}'})
-                        st.dataframe(sty, width='stretch')
-
-                    # Mostrar las últimas N ocurrencias relacionadas con los cálculos
-                    try:
-                        N = 4
-                        target_wd = fecha.weekday()
-
-                        # Mostrar una sola tabla combinada con las últimas N ocurrencias del AÑO ACTUAL
-                        # y las correspondientes del AÑO ANTERIOR (Base Histórica), además del % de cambio.
-                        try:
-                            current_year = fecha.year
-                            base_year = fecha.year - 1
-
-                            # Preparar datos año actual
-                            df_curr_year = st.session_state.df_historico[st.session_state.df_historico.index.year == current_year].copy()
-                            occ_curr = df_curr_year[df_curr_year.index.weekday == target_wd].sort_index()
-                            occ_curr_before = occ_curr[occ_curr.index < fecha]
-                            last_curr = occ_curr_before['ventas'].iloc[-N:]
-
-                            # Preparar datos año base (excluyendo festivos y eventos) y siempre tomar
-                            # las ocurrencias anteriores a la fecha equivalente en el año base.
-                            df_base_year = st.session_state.df_historico[st.session_state.df_historico.index.year == base_year].copy()
-                            festivos_b = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
-                            eventos_mask = st.session_state.get('eventos', {})
-                            mask_no_f = ~df_base_year.index.isin(festivos_b)
-                            mask_no_e = ~df_base_year.index.astype(str).isin(eventos_mask.keys())
-                            df_clean = df_base_year[mask_no_f & mask_no_e]
-                            occ_base = df_clean[df_clean.index.weekday == target_wd].sort_index()
-                            # Fecha de referencia en el año base (aunque no exista como fila)
-                            try:
-                                fecha_base_ref = fecha.replace(year=base_year)
-                            except Exception:
-                                fecha_base_ref = pd.Timestamp(base_year, fecha.month, fecha.day)
-                            occ_base_before = occ_base[occ_base.index < fecha_base_ref]
-                            last_base = occ_base_before['ventas'].iloc[-N:]
-
-                            # Si no hay datos suficientes, informar al usuario
-                            if (last_curr.empty and last_base.empty):
-                                st.markdown(f"(No hay suficientes ocurrencias del mismo weekday en {current_year} ni en {base_year} antes de la fecha de referencia.)")
-                            else:
-                                # Construir tabla combinada; invertimos para mostrar de más reciente a más antiguo
-                                curr_dates = list(last_curr.index)[::-1]
-                                curr_vals = list(last_curr.values)[::-1]
-                                base_dates = list(last_base.index)[::-1]
-                                base_vals = list(last_base.values)[::-1]
-                                max_len = max(len(curr_vals), len(base_vals))
-                                rows = []
-                                for i in range(max_len):
-                                    c_date = curr_dates[i] if i < len(curr_dates) else pd.NaT
-                                    c_val = curr_vals[i] if i < len(curr_vals) else np.nan
-                                    b_date = base_dates[i] if i < len(base_dates) else pd.NaT
-                                    b_val = base_vals[i] if i < len(base_vals) else np.nan
-                                    if not (pd.isna(b_val) or b_val == 0):
-                                        pct = (c_val - b_val) / b_val * 100.0
-                                    else:
-                                        pct = np.nan
-                                    rows.append({
-                                        'fecha_actual': c_date,
-                                        'ventas_actual': c_val,
-                                        'fecha_anterior': b_date,
-                                        'ventas_anterior': b_val,
-                                        'pct_change': pct
-                                    })
-
-                                df_comp = pd.DataFrame(rows)
-                                # Formatear columnas
-                                try:
-                                    df_comp['fecha_actual'] = pd.to_datetime(df_comp['fecha_actual'])
-                                except Exception:
-                                    pass
-                                try:
-                                    df_comp['fecha_anterior'] = pd.to_datetime(df_comp['fecha_anterior'])
-                                except Exception:
-                                    pass
-
-                                st.markdown(f"**Comparación últimas {N} ocurrencias — año {current_year} vs {base_year}:**")
-                                # Usamos el DataFrame numérico para formatear y colorear la columna pct_change
-                                try:
-                                    sty = df_comp.style.format({
-                                        'fecha_actual': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
-                                        'fecha_anterior': lambda v: v.strftime('%Y-%m-%d') if not pd.isna(v) else '',
-                                        'ventas_actual': '€{:,.2f}',
-                                        'ventas_anterior': '€{:,.2f}',
-                                        'pct_change': '{:+.1f}%'
-                                    })
-                                    def color_pct(val):
-                                        try:
-                                            v = float(val)
-                                        except Exception:
-                                            return ''
-                                        return 'color: green' if v > 0 else ('color: red' if v < 0 else '')
-                                    # `Styler.applymap` está deprecado; usar `Styler.map` en su lugar
-                                    sty = sty.map(lambda v: 'color: green' if (isinstance(v, (int, float)) and v > 0) else ('color: red' if (isinstance(v, (int, float)) and v < 0) else ''), subset=['pct_change'])
-                                    st.dataframe(sty, width='stretch')
-                                except Exception:
-                                    # Fallback: format as strings and show without extra styling
-                                    df_comp_display = df_comp.copy()
-                                    df_comp_display['ventas_actual'] = df_comp_display['ventas_actual'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
-                                    df_comp_display['ventas_anterior'] = df_comp_display['ventas_anterior'].map(lambda x: f"€{x:,.2f}" if not pd.isna(x) else "")
-                                    df_comp_display['pct_change'] = df_comp_display['pct_change'].map(lambda x: f"{x:+.1f}%" if not pd.isna(x) else "")
-                                    st.dataframe(df_comp_display, width='stretch')
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-
-                    if not df_summary.empty:
-                        # Colorear CV/weights para visibilidad
-                        def color_summary(val, idx):
-                            try:
-                                v = float(val)
-                            except Exception:
-                                return ''
-                            if idx == 'CV':
-                                return 'color: red' if v > 0.3 else 'color: green'
-                            if 'Peso' in idx:
-                                return 'color: green' if v >= 0.8 else ''
-                            return ''
-
-                        st.markdown("**Resumen estadístico:**")
-                        # df_summary tiene índice Metric y columna Value
-                        try:
-                            styles_summary = pd.DataFrame('', index=df_summary.index, columns=df_summary.columns)
-                            for idx in df_summary.index:
-                                styles_summary.loc[idx, 'Value'] = color_summary(df_summary.loc[idx, 'Value'], idx)
-                            sty2 = df_summary.style.format({'Value': '{:,.2f}'}).apply(lambda _: styles_summary, axis=None)
-                        except Exception:
-                            sty2 = df_summary.style.format({'Value': '{:,.2f}'})
-                        st.dataframe(sty2, width='stretch')
             except Exception:
                 pass
 
@@ -2531,8 +3457,10 @@ if display_results:
     fig_barras = generar_grafico_barras_dias(df_prediccion, df_base_week)
     st.plotly_chart(fig_barras, width="stretch", config=plotly_config) 
 
-if not display_results: 
-    if st.session_state.df_historico.empty:
+if not display_results:
+    # Usar get para evitar AttributeError si la clave no existe
+    df_hist = st.session_state.get('df_historico', None)
+    if df_hist is None or (hasattr(df_hist, 'empty') and df_hist.empty):
         st.warning("No hay datos históricos cargados. Súbelos en la barra lateral.")
     else:
         st.info("Selecciona el lunes de una semana y pulsa 'Calcular' para ver los resultados.")
