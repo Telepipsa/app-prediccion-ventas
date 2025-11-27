@@ -66,6 +66,41 @@ if not st.session_state.autenticado:
     except Exception:
         PASSWORD_SECRET = None
 
+# Preparar token path y utilidades de validación/escritura de token
+proyecto_dir = os.path.dirname(os.path.abspath(__file__))
+token_path = os.path.join(proyecto_dir, '.streamlit', '.auth_token')
+
+def _validate_auth_token(path, secret, max_age_days=30):
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, 'r', encoding='utf-8') as tf:
+            content = tf.read().strip()
+        if ':' not in content:
+            return False
+        ts_str, sig = content.split(':', 1)
+        ts = int(ts_str)
+        if abs(int(time.time()) - ts) > int(max_age_days * 24 * 3600):
+            return False
+        expected = hmac.new(secret.encode('utf-8'), ts_str.encode('utf-8'), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+def _write_auth_token(path, secret):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ts = str(int(time.time()))
+        sig = hmac.new(secret.encode('utf-8'), ts.encode('utf-8'), hashlib.sha256).hexdigest()
+        with open(path, 'w', encoding='utf-8') as tf:
+            tf.write(f"{ts}:{sig}")
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     # Si Streamlit no tiene la clave (a veces no se carga por cwd/permiso),
     # intentar leer manualmente el archivo .streamlit/secrets.toml del proyecto.
     if PASSWORD_SECRET is None:
