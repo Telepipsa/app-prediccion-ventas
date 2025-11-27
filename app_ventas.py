@@ -111,8 +111,15 @@ if os.path.exists(dev_no_auth_path):
             except Exception:
                 PASSWORD_SECRET = None
 
-    # Restaurar sesión desde token si procede (hacerlo antes de mostrar cualquier UI)
-    if PASSWORD_SECRET and _validate_auth_token(token_path, PASSWORD_SECRET):
+    # Control para restauración automática: sólo si el deploy/secret lo permite.
+    # Esto evita que tokens antiguos en el host produzcan login automático en producción.
+    try:
+        ENABLE_TOKEN_RESTORE = bool(str(st.secrets.get('ENABLE_TOKEN_RESTORE', False)).lower() in ('1', 'true', 'yes'))
+    except Exception:
+        ENABLE_TOKEN_RESTORE = False
+
+    # Restaurar sesión desde token si proceden y está explícitamente habilitado
+    if ENABLE_TOKEN_RESTORE and PASSWORD_SECRET and _validate_auth_token(token_path, PASSWORD_SECRET):
         st.session_state.autenticado = True
         if 'auth_restored_msg' not in st.session_state:
             try:
@@ -144,7 +151,9 @@ if os.path.exists(dev_no_auth_path):
                 st.session_state.autenticado = True
                 st.success('Acceso correcto.')
                 try:
-                    _write_auth_token(token_path, PASSWORD_SECRET)
+                    # Sólo escribir token de persistencia si la opción está habilitada explícitamente
+                    if ENABLE_TOKEN_RESTORE:
+                        _write_auth_token(token_path, PASSWORD_SECRET)
                 except Exception:
                     pass
                 try:
