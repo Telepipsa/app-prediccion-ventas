@@ -740,10 +740,46 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
     fecha_str_base = fecha_base_exacta.strftime('%Y-%m-%d')
 
     is_domingo = fecha_actual.weekday() == 6
+    # Preparar flags comunes
+    try:
+        fecha_str = fecha_actual.strftime('%Y-%m-%d')
+    except Exception:
+        fecha_str = str(fecha_actual)
+    try:
+        is_evento_manual_local = fecha_str in (eventos_dict or {})
+    except Exception:
+        is_evento_manual_local = False
+    try:
+        fcb_matches = st.session_state.get('fcb_matches', {})
+        rm_matches = st.session_state.get('rm_matches', {})
+    except Exception:
+        fcb_matches = {}
+        rm_matches = {}
+    # Si es festivo o evento y cae en fin de semana pero NO es partido de fútbol,
+    # marcaremos para SALTAR la lógica especial de festivos y tratarlo como día
+    # normal (misma weekday en año base). Guardaremos una nota explicativa.
+    skip_festivo_logic = False
+    try:
+        if (es_festivo(fecha_actual) or is_evento_manual_local) and fecha_actual.weekday() in (5, 6):
+            if (fecha_str not in fcb_matches) and (fecha_str not in rm_matches):
+                skip_festivo_logic = True
+    except Exception:
+        skip_festivo_logic = False
+    # Determinar si la fecha actual está marcada como festivo automático o como evento manual
+    try:
+        is_festivo_actual = es_festivo(fecha_actual)
+    except Exception:
+        is_festivo_actual = False
+    try:
+        is_evento_manual = fecha_actual.strftime('%Y-%m-%d') in (eventos_dict or {})
+    except Exception:
+        is_evento_manual = False
 
-    # Regla prioritaria: si la fecha actual es domingo, forzamos búsqueda de domingos
-    # en el año base dentro de una ventana +/-7 días y devolvemos el domingo más cercano
-    if is_domingo:
+    # Regla prioritaria: si la fecha actual es domingo Y NO es festivo automático ni evento manual,
+    # forzamos búsqueda de domingos en el año base dentro de una ventana +/-7 días y devolvemos
+    # el domingo más cercano. Si el domingo es un festivo o un evento manual, dejamos que la
+    # lógica de festivos/eventos lo procese más abajo.
+    if is_domingo and (not is_festivo_actual) and (not is_evento_manual):
         try:
             ventana_start = fecha_base_exacta - timedelta(days=7)
             ventana_end = fecha_base_exacta + timedelta(days=7)
@@ -761,7 +797,7 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
         except Exception:
             pass
 
-    if es_festivo(fecha_actual) or es_vispera_de_festivo(fecha_actual):
+    if (es_festivo(fecha_actual) or es_vispera_de_festivo(fecha_actual)) and (not skip_festivo_logic):
         # Preparamos estructura de festivos del año base
         try:
             festivos_base = pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == base_year])
@@ -1251,6 +1287,22 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             except Exception:
                 fecha_base_historica = None
                 ventas_base_historica = ventas_base
+        # Si hemos decidido saltar la lógica de festivos porque el festivo/ evento
+        # cae en fin de semana y no es partido de fútbol, añadimos una nota informativa
+        # que luego usaremos en la explicación del día.
+        try:
+            fecha_key = fecha_actual.strftime('%Y-%m-%d')
+            is_festivo_now = (fecha_actual in festivos_es) or es_festivo(fecha_actual)
+            fcb_matches = st.session_state.get('fcb_matches', {})
+            rm_matches = st.session_state.get('rm_matches', {})
+            if (is_festivo_now or (fecha_key in eventos)) and fecha_actual.weekday() in (5, 6) and (fecha_key not in fcb_matches) and (fecha_key not in rm_matches):
+                try:
+                    nota = f"Se ha comparado con {fecha_base_historica} porque el festivo/evento actual cae en fin de semana; en el año anterior la fecha equivalente usada fue {fecha_base_historica} y la venta registrada fue €{float(ventas_base):.2f}."
+                except Exception:
+                    nota = f"Se ha comparado con {fecha_base_historica} porque el festivo/evento actual cae en fin de semana."
+                st.session_state.setdefault('base_notes', {})[fecha_key] = nota
+        except Exception:
+            pass
         if pd.isna(ventas_base): ventas_base = 0.0
 
         # Si la fecha base exacta existe y en el año base era festivo/víspera,
@@ -1359,11 +1411,13 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             fcb_pct_base = None
             rm_pct_base = None
 
-        # --- Nuevo: si la fecha base utilizada tuvo un partido FCB/RM entonces usamos la base histórica
-        # "sin el efecto del partido" como la base real para los cálculos posteriores.
+        # --- Nota: si la fecha base utilizada tuvo un partido FCB/RM calculamos
+        # una versión "sin el efecto del partido" únicamente para auditoría
+        # (variable `base_historica_sin_partido`), pero NO la usamos para
+        # reemplazar la base histórica real. De este modo la comparación sigue
+        # siendo con la fecha equivalente del año anterior (incluso si hubo partido).
         base_historica_sin_partido = None
         try:
-            # start from original historical base
             if ventas_base_historica is not None:
                 adj = 1.0
                 if fcb_pct_base is not None:
@@ -1376,27 +1430,68 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                         adj *= (1.0 - float(rm_pct_base))
                     except Exception:
                         pass
-                # If any adjustment applied (adj != 1), compute adjusted base
+                # Si hay ajuste, guardarlo solo para referencia/auditoría pero
+                # no modificar `ventas_base` que representa la observación cruda
                 if adj != 1.0:
-                    base_historica_sin_partido = float(ventas_base_historica) * adj
-                    ventas_base = base_historica_sin_partido
                     try:
-                        base_val_usada = float(ventas_base)
+                        base_historica_sin_partido = float(ventas_base_historica) * adj
                     except Exception:
-                        base_val_usada = None
+                        base_historica_sin_partido = None
         except Exception:
             base_historica_sin_partido = None
+
+        # Asegurar que `base_val_usada` refleje la base histórica cruda (ventas_base)
+        # salvo que otra parte del código la haya establecido explícitamente.
+        try:
+            if ('base_val_usada' not in locals()) or (base_val_usada is None):
+                base_val_usada = float(ventas_base) if ventas_base is not None else None
+        except Exception:
+            base_val_usada = None
 
         ultimas_4_semanas = df_current_hist[df_current_hist.index.weekday == dia_semana_num].sort_index(ascending=False).head(4)
         media_reciente_current = ultimas_4_semanas['ventas'].mean() if not ultimas_4_semanas.empty else ventas_base
         if pd.isna(media_reciente_current): media_reciente_current = 0.0
         
         factor_tendencia = calcular_tendencia_reciente(df_current_hist, dia_semana_num, num_semanas=8)
-        media_ajustada_tendencia = media_reciente_current * factor_tendencia
-        # Calculamos ambas versiones de mezcla: con y sin ajuste YTD.
-        ventas_base_ajustada_ytd = ventas_base * ytd_factor
-        pred_mix_with_ytd = (ventas_base_ajustada_ytd * 0.3) + (media_ajustada_tendencia * 0.7)
-        pred_mix_no_ytd = (ventas_base * 0.3) + (media_ajustada_tendencia * 0.7)
+
+        # media reciente ajustada por la tendencia reciente (usada en ramas de festivo/víspera
+        # donde preferimos confiar en la señal reciente ajustada en lugar de la base histórica)
+        try:
+            media_ajustada_tendencia = float(media_reciente_current) * float(factor_tendencia) if media_reciente_current is not None else 0.0
+        except Exception:
+            media_ajustada_tendencia = media_reciente_current if media_reciente_current is not None else 0.0
+
+        # Aplicar factores a la BASE histórica (según especificación):
+        # - la tendencia reciente (factor_tendencia),
+        # - el factor mensual/decay (decay_factor) según posición en el mes,
+        # - y el ajuste anual (YTD) sólo en la rama con YTD.
+        # La media reciente se debe usar SIN ajustar por tendencia; la mezcla 30/70
+        # se calcula entre la base (ya ajustada por los factores) y la media reciente.
+
+        # obtener decay_factor antes de la mezcla (depende de la semana del mes)
+        wom = week_of_month_custom(fecha_actual)
+        decay_factor = decay_factors.get(wom, 1.0)
+
+        # aplicar tendencia y decay/mes a la base histórica
+        try:
+            ventas_base_trended = ventas_base * factor_tendencia
+        except Exception:
+            ventas_base_trended = ventas_base
+        try:
+            ventas_base_trended_month = ventas_base_trended * (month_factor if 'month_factor' in locals() else 1.0) * decay_factor
+        except Exception:
+            ventas_base_trended_month = ventas_base_trended
+
+        # version con YTD aplicada sobre la base ya transformada
+        try:
+            ventas_base_ajustada_ytd = ventas_base_trended_month * ytd_factor
+        except Exception:
+            ventas_base_ajustada_ytd = ventas_base_trended_month
+
+        # media reciente SIN ajustar por tendencia (usar media_reciente_current tal cual)
+        # Calculamos las mezclas 30/70 usando la base transformada y la media reciente
+        pred_mix_with_ytd = (ventas_base_ajustada_ytd * 0.3) + (media_reciente_current * 0.7)
+        pred_mix_no_ytd = (ventas_base_trended_month * 0.3) + (media_reciente_current * 0.7)
 
         impacto_evento = 1.0
         tipo_evento = "Día Normal"
@@ -1435,10 +1530,21 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         # - Para días normales NO aplicamos el ajuste YTD (está reflejado en la media reciente y la base),
         #   sólo aplicamos el factor por posición en el mes (decay_factor) posteriormente.
         try:
+            # Excepción: en diciembre damos más peso a la base histórica
+            # (70% base / 30% media reciente) SOLO para días normales
+            # (no festivos, no eventos manuales, no vísperas). Los festivos
+            # y vísperas conservan sus reglas y porcentajes habituales.
             if is_evento_manual or is_festivo_auto or is_vispera:
                 prediccion_base_ajustada = float(pred_mix_with_ytd)
             else:
-                prediccion_base_ajustada = float(pred_mix_no_ytd)
+                try:
+                    if fecha_actual.month == 12:
+                        # invertir peso para diciembre en días normales
+                        prediccion_base_ajustada = float((ventas_base_trended_month * 0.7) + (media_reciente_current * 0.3))
+                    else:
+                        prediccion_base_ajustada = float(pred_mix_no_ytd)
+                except Exception:
+                    prediccion_base_ajustada = float(pred_mix_no_ytd)
         except Exception:
             prediccion_base_ajustada = float(pred_mix_no_ytd)
 
@@ -1448,9 +1554,15 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         except Exception:
             pred_before_decay = None
 
-        wom = week_of_month_custom(fecha_actual)
-        decay_factor = decay_factors.get(wom, 1.0)
-        prediccion_base = prediccion_base_ajustada * decay_factor
+        # Ya hemos aplicado el decay_factor a la base antes de la mezcla,
+        # por tanto no volver a multiplicar aquí (evita aplicar decay dos veces).
+        prediccion_base = prediccion_base_ajustada
+        # Asegurar que la predicción no sea inferior a la media reciente (no tendría sentido)
+        try:
+            if prediccion_base < media_reciente_current:
+                prediccion_base = float(media_reciente_current)
+        except Exception:
+            pass
         # guardar predicción antes de clipping para auditoría
         try:
             pred_before_clipping = float(prediccion_base)
@@ -2407,7 +2519,11 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             'ventas_predichas': prediccion_final, 
             'prediccion_pura': prediccion_base, 
             'ventas_reales_current_year': ventas_reales_current,
-            'base_historica': ventas_base,
+            # `ventas_base_historica` es la observación cruda del año base (lo que mostramos en "Detalle").
+            # Exigir que `base_historica` refleje SIEMPRE ese valor crudo para evitar inconsistencias
+            # entre la tabla resumida y el detalle. `base_val_usada` mantiene la base ajustada usada
+            # en los cálculos (por ejemplo, sin el efecto de partido).
+            'base_historica': ventas_base_historica if 'ventas_base_historica' in locals() and ventas_base_historica is not None else ventas_base,
             'fecha_base_historica': fecha_base_historica,
             'ventas_base_historica': ventas_base_historica,
             'media_reciente_current_year': media_reciente_current,
@@ -2493,6 +2609,14 @@ def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_
     # Construir lista HTML
     try:
         li_elems = ''.join([f"<li>{it}</li>" for it in items])
+        # Añadir nota informativa si existe en st.session_state
+        try:
+            fecha_key = pd.to_datetime(fecha_actual).strftime('%Y-%m-%d')
+            nota = st.session_state.get('base_notes', {}).get(fecha_key)
+            if nota:
+                li_elems += f"<li><em>{nota}</em></li>"
+        except Exception:
+            pass
         return f"<ul>{li_elems}</ul>"
     except Exception:
         return '\n'.join(items)
@@ -3398,7 +3522,7 @@ if display_results:
     except Exception:
         pass
     
-    # --- Resumen de impacto de partidos RM (paralelo al de FCB) ---
+    # Resumen de impacto de partidos RM (paralelo al de FCB)
     try:
         rm_matches = st.session_state.get('rm_matches', {})
         df_h = st.session_state.get('df_historico', pd.DataFrame())
@@ -3872,6 +3996,11 @@ if display_results:
     except Exception:
         # Fallback si hay problemas con Styler: mostrar el DataFrame plano
         st.write(display_df)
+    # Nota: para recordar la regla especial de diciembre
+    try:
+        st.markdown("* Para los días de diciembre la base histórica tiene un peso del 70% y la media reciente del 30%.")
+    except Exception:
+        pass
     # --- Nueva tabla: detalles de la Base Histórica usada por fila ---
     try:
         # Construir DataFrame que mapea cada fila de la predicción a su fecha base exacta
@@ -4321,98 +4450,7 @@ if display_results:
         )
     else:
         st.error(f"El optimizador falló con el estado: {status}")
-    # --- Resumen de impacto de partidos RM (paralelo al de FCB) ---
-    try:
-        rm_matches = st.session_state.get('rm_matches', {})
-        df_h = st.session_state.get('df_historico', pd.DataFrame())
-        impacto_rows_rm = []
-        for fecha_str, val in (rm_matches or {}).items():
-            try:
-                fecha_dt = pd.to_datetime(fecha_str)
-            except Exception:
-                continue
-            if fecha_dt not in df_h.index:
-                continue
-            ventas_partido = float(df_h.loc[fecha_dt, 'ventas'])
-            year = fecha_dt.year
-            occ_same = df_h[(df_h.index.year == year) & (df_h.index.weekday == fecha_dt.weekday())].sort_index()
-            occ_prev = occ_same[occ_same.index < fecha_dt]
-            prev_filtered = []
-            for d in reversed(list(occ_prev.index)):
-                d_str = d.strftime('%Y-%m-%d')
-                if d_str in rm_matches:
-                    continue
-                if es_festivo(d) or es_vispera_de_festivo(d):
-                    continue
-                prev_filtered.append(float(df_h.loc[d, 'ventas']))
-                if len(prev_filtered) >= 3:
-                    break
-            if len(prev_filtered) == 0:
-                continue
-            mean_prev = float(np.mean(prev_filtered))
-            pct = (ventas_partido - mean_prev) / mean_prev if mean_prev > 0 else 0.0
-            partido_desc = None
-            hora_desc = None
-            if isinstance(val, dict):
-                partido_desc = val.get('partido')
-                hora_desc = val.get('hora')
-            else:
-                partido_desc = val
-            impacto_rows_rm.append({
-                'fecha': fecha_dt,
-                'partido': partido_desc,
-                'Hora': hora_desc,
-                'ventas_partido': ventas_partido,
-                'mean_prev': mean_prev,
-                'pct_change': pct
-            })
-        if impacto_rows_rm:
-            df_imp_rm = pd.DataFrame(impacto_rows_rm).sort_values('pct_change', ascending=False)
-            df_imp_rm = df_imp_rm.rename(columns={'mean_prev': 'Media previa', 'pct_change': 'Impacto del partido'})
-            with st.expander('Partidos RM con mayor impacto histórico (ordenados)', expanded=False):
-                st.markdown('Resumen de partidos RM detectados y su impacto relativo sobre ventas (comparado con media de hasta 3 días previos same-weekday).')
-                cols = st.columns([1,1,1,1])
-                with cols[0]:
-                    top_n_rm = st.number_input('Mostrar top N (RM)', min_value=1, max_value=50, value=10, step=1, key='top_n_rm')
-                with cols[1]:
-                    sign_filter_rm = st.selectbox('Tipo (RM)', options=['Todos','Aumento','Disminución'], key='sign_filter_rm')
-                with cols[2]:
-                    def _rm_search_changed():
-                        return None
-                    st.text_input('Buscar equipo (RM)', value='', placeholder='p.ej. Granada', key='rm_search', on_change=_rm_search_changed)
-                df_show_rm = df_imp_rm.copy()
-                try:
-                    search_team_rm = st.session_state.get('rm_search', '')
-                    if search_team_rm and str(search_team_rm).strip() != '':
-                        term = str(search_team_rm).strip().lower()
-                        if 'partido' in df_show_rm.columns:
-                            df_show_rm = df_show_rm[df_show_rm['partido'].astype(str).str.lower().str.contains(term)]
-                except Exception:
-                    pass
-                if sign_filter_rm == 'Aumento':
-                    df_show_rm = df_show_rm[df_show_rm['Impacto del partido'] > 0]
-                elif sign_filter_rm == 'Disminución':
-                    df_show_rm = df_show_rm[df_show_rm['Impacto del partido'] < 0]
-                df_show_rm = df_show_rm.head(int(top_n_rm))
-                if 'Hora' in df_show_rm.columns:
-                    if df_show_rm['Hora'].notna().any():
-                        df_show_rm['Hora'] = df_show_rm['Hora'].fillna('N/A')
-                    else:
-                        df_show_rm = df_show_rm.drop(columns=['Hora'])
-                try:
-                    display_cols_rm = [c for c in ['fecha', 'partido', 'Hora', 'ventas_partido', 'Media previa', 'Impacto del partido'] if c in df_show_rm.columns]
-                    df_show_rm = df_show_rm[display_cols_rm]
-                    sty_rm = df_show_rm.style.format({
-                        'fecha': lambda d: d.strftime('%Y-%m-%d'),
-                        'ventas_partido': '€{:,.2f}',
-                        'Media previa': '€{:,.2f}',
-                        'Impacto del partido': '{:+.1%}'
-                    })
-                    st.dataframe(sty_rm, width='stretch')
-                except Exception:
-                    st.dataframe(df_show_rm, width='stretch')
-    except Exception:
-        pass
+    pass
 
     st.subheader("3. Visualización de Datos")
     fecha_inicio_dt = datetime.combine(fecha_inicio_seleccionada, datetime.min.time())
