@@ -314,6 +314,20 @@ FACTOR_MINIMO = 0.70
 
 festivos_es = holidays.Spain(years=[2024, 2025, 2026, 2027, 2028])
 
+# Añadir festivos explícitos que no aparecen por defecto o que queremos asegurar
+# (p. ej. Noche Buena / San Esteban según solicitud del usuario).
+for _y in [2024, 2025, 2026, 2027, 2028]:
+    try:
+        d_noche = datetime(_y, 12, 24).date()
+        d_esteban = datetime(_y, 12, 26).date()
+        if d_noche not in festivos_es:
+            festivos_es[d_noche] = "Noche Buena"
+        if d_esteban not in festivos_es:
+            festivos_es[d_esteban] = "San Esteban"
+    except Exception:
+        # No bloquear el inicializado por un año inválido
+        pass
+
 def get_daily_limits(ventas_dia, dia_semana_num):
     """
     Calcula límites dinámicos diarios basados en ventas estimadas y día de la semana.
@@ -906,26 +920,53 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
             except Exception:
                 pass
 
-        # 2) Si es VÍSPERA: para vísperas que caen en viernes/sábado/domingo
-        # buscamos el mismo weekday en el año anterior que NO sea festivo; si el candidato
-        # está marcado como festivo, retroceder una semana hasta encontrar un weekday no-festivo.
-        if es_vispera_de_festivo(fecha_actual) and dia_semana_num in (4, 5, 6):
+        # 2) Si es VÍSPERA: priorizamos comparar VÍSPERA vs VÍSPERA en el año base.
+        # Construimos la lista de vísperas del año base (festivo_base - 1 día) que existen en el histórico
+        # y preferimos la que coincide con la misma fecha (día/mes) del año anterior; si no existe,
+        # buscamos la víspera con el mismo weekday más cercana.
+        if es_vispera_de_festivo(fecha_actual):
             try:
-                target_wd = dia_semana_num
-                # Empezar por la misma fecha (día/mes) en el año base
-                candidate = fecha_base_exacta
-                attempts = 0
-                while attempts < 8:
-                    if candidate in df_base.index and candidate.weekday() == target_wd:
-                        # si no es festivo en el año base y no es evento (si exclude_eventos), lo usamos
-                        is_candidate_fest = candidate in festivos_base
-                        candidate_str = candidate.strftime('%Y-%m-%d')
-                        is_candidate_event = (candidate_str in eventos_dict) if eventos_dict else False
-                        if (not is_candidate_fest) and (exclude_eventos and not is_candidate_event or not exclude_eventos):
-                            return float(df_base.loc[candidate, 'ventas']), candidate.strftime('%Y-%m-%d')
-                    # retroceder una semana (mismo weekday anterior)
-                    candidate = candidate - timedelta(days=7)
-                    attempts += 1
+                # Comprobación explícita y robusta: si la fecha equivalente del año base
+                # existe en el histórico y su día siguiente es festivo (es víspera),
+                # devolverla inmediatamente. Esto evita problemas por diferencias
+                # de tipos (date vs Timestamp) en las comprobaciones anteriores.
+                try:
+                    fb = fecha_base_exacta
+                    fb_ts = pd.Timestamp(fb)
+                    # la fecha base existe en df_base y el día siguiente es un festivo en festivos_es
+                    next_day = (fb_ts + timedelta(days=1)).date()
+                    if (fb_ts in df_base.index) and (next_day in [d if isinstance(d, datetime) else d for d in festivos_es]):
+                        return float(df_base.loc[fb_ts, 'ventas']), fb_ts.strftime('%Y-%m-%d')
+                except Exception:
+                    pass
+                visperas_candidates = []
+                try:
+                    for d in festivos_base:
+                        try:
+                            visp = (pd.Timestamp(d) - timedelta(days=1)).date()
+                            if visp.year != base_year:
+                                continue
+                            visp_ts = pd.Timestamp(visp)
+                            if visp_ts in df_base.index:
+                                visperas_candidates.append(visp_ts)
+                        except Exception:
+                            continue
+                except Exception:
+                    visperas_candidates = []
+
+                # preferir la misma fecha exacta (día/mes) en el año base
+                try:
+                    if fecha_base_exacta in visperas_candidates:
+                        ventas_base = float(df_base.loc[fecha_base_exacta, 'ventas'])
+                        fecha_base_historica = fecha_base_exacta.strftime('%Y-%m-%d')
+                        ventas_base_historica = ventas_base
+                except Exception:
+                    pass
+
+                # NOTA: no buscamos una "víspera cercana" por weekday.
+                # Para vísperas debemos comparar únicamente con la MISMA fecha (día/mes)
+                # del año base si existe; si no existe, dejamos que la lógica general
+                # continúe (no forzamos una víspera distinta).
             except Exception:
                 pass
 
@@ -1245,10 +1286,50 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                         ventas_base_historica = ventas_base
                         # inicialmente marcamos que vino del mapeo por semana
                         selected_rule = 'base_week_start'
+                        # Si la FECHA ACTUAL NO es víspera, NO deberíamos usar una fecha base
+                        # que en el año base sea víspera o festivo. En ese caso intentamos
+                        # buscar una alternativa preferentemente en la semana siguiente,
+                        # luego en la anterior, hasta +/-4 semanas.
+                        try:
+                            if (not es_vispera_de_festivo(fecha_actual)):
+                                try:
+                                    candidate_is_fest = candidate_base_date in festivos_es or es_festivo(candidate_base_date)
+                                except Exception:
+                                    candidate_is_fest = False
+                                try:
+                                    candidate_is_vispera = es_vispera_de_festivo(candidate_base_date)
+                                except Exception:
+                                    candidate_is_vispera = False
+                                if candidate_is_fest or candidate_is_vispera:
+                                    offsets = [7, -7, 14, -14, 21, -21, 28, -28]
+                                    replaced = False
+                                    for off in offsets:
+                                        try:
+                                            cand2 = candidate_base_date + timedelta(days=off)
+                                            if cand2.year != target_base_year:
+                                                continue
+                                            if cand2 in df_historico.index and cand2.weekday() == candidate_base_date.weekday():
+                                                cand2_str = cand2.strftime('%Y-%m-%d')
+                                                is_cand2_fest = cand2 in festivos_es or es_festivo(cand2)
+                                                is_cand2_visp = es_vispera_de_festivo(cand2)
+                                                is_cand2_event = (cand2_str in eventos) if eventos else False
+                                                if (not is_cand2_fest) and (not is_cand2_visp) and (is_evento_manual or not is_cand2_event):
+                                                    ventas_base = float(df_historico.loc[cand2, 'ventas'])
+                                                    fecha_base_str = cand2_str
+                                                    fecha_base_historica = fecha_base_str
+                                                    ventas_base_historica = ventas_base
+                                                    selected_rule = f'base_week_start_shifted:{fecha_base_str}'
+                                                    replaced = True
+                                                    break
+                                        except Exception:
+                                            continue
+                                    # si no hemos encontrado alternativa, mantenemos el candidato original
+                        except Exception:
+                            pass
                         # Si la fecha actual es víspera de festivo y cae en viernes,
                         # preferimos aplicar la lógica especializada (no comparar vísperas con vísperas/festivos)
                         try:
-                            if es_vispera_de_festivo(fecha_actual) and fecha_actual.weekday() == 4:
+                            if es_vispera_de_festivo(fecha_actual):
                                 # si el candidato en el año base es festivo o es víspera, forzamos recalcular
                                 try:
                                     candidate_is_festivo = es_festivo(candidate_base_date) or (candidate_base_date in pd.DatetimeIndex([pd.Timestamp(d) for d in festivos_es if pd.Timestamp(d).year == candidate_base_date.year]))
@@ -1314,7 +1395,11 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         except Exception:
             fecha_base_exacta = None
 
-        if fecha_base_exacta is not None and fecha_base_exacta in df_base.index and not (is_evento_manual or is_festivo_auto):
+        # Para VÍSPERAS queremos preservar la comparación con la MISMA fecha
+        # del año base si existe — evitar que la lógica de "media de últimas
+        # ocurrencias" la reemplace. Por tanto, no ejecutar la regla de medias
+        # cuando la fecha actual sea víspera de festivo.
+        if fecha_base_exacta is not None and fecha_base_exacta in df_base.index and not (is_evento_manual or is_festivo_auto) and (not es_vispera_de_festivo(fecha_actual)):
             # Solo aplicar la regla de 'media de últimas ocurrencias' si la fecha base exacta
             # es la que se hubiera usado como fecha base (es decir, no hemos elegido ya
             # otro candidato mediante la lógica anterior como ocurre con vísperas especiales).
@@ -1329,6 +1414,42 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 skip_media_prev = False
             # comprobar si la fecha base era festivo o víspera
             if not skip_media_prev and (es_festivo(fecha_base_exacta) or es_vispera_de_festivo(fecha_base_exacta)):
+                # Si la fecha base exacta es VÍSPERA, primero intentar localizar una víspera
+                # equivalente en el año base o, si no es adecuada, buscar el mismo weekday
+                # en la semana anterior/posterior que no sea ni víspera ni festivo.
+                try:
+                    if es_vispera_de_festivo(fecha_base_exacta):
+                        # intentar la propia fecha_base_exacta primero (si existe en df_base y no es festivo)
+                        try:
+                            if fecha_base_exacta in df_base.index and not es_festivo(fecha_base_exacta):
+                                ventas_base = float(df_base.loc[fecha_base_exacta, 'ventas'])
+                                fecha_base_historica = fecha_base_exacta.strftime('%Y-%m-%d')
+                                ventas_base_historica = ventas_base
+                        except Exception:
+                            pass
+                        # buscar en semanas +/-7 días el mismo weekday que no sea festivo ni vispera
+                        target_wd = fecha_base_exacta.weekday()
+                        offsets = [-7, 7, -14, 14, -21, 21]
+                        found = False
+                        for off in offsets:
+                            try:
+                                cand = fecha_base_exacta + timedelta(days=off)
+                                cand_str = cand.strftime('%Y-%m-%d')
+                                if cand in df_base.index and cand.weekday() == target_wd:
+                                    if (not es_festivo(cand)) and (not es_vispera_de_festivo(cand)) and (not (cand_str in eventos if eventos else False)):
+                                        ventas_base = float(df_base.loc[cand, 'ventas'])
+                                        fecha_base_historica = cand.strftime('%Y-%m-%d')
+                                        ventas_base_historica = ventas_base
+                                        found = True
+                                        break
+                            except Exception:
+                                continue
+                        if found:
+                            pass  # ventas_base ya establecido
+                    # si no era víspera o no hemos encontrado candidato, caer en la regla de medias
+                except Exception:
+                    pass
+
                 # calcular media de las últimas 4 ocurrencias del mismo weekday en el año base, excluyendo eventos/festivos
                 # usar el weekday del día actual para obtener las últimas ocurrencias del mismo weekday
                 target_wd = fecha_actual.weekday()
@@ -1560,6 +1681,26 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         # Asegurar que la predicción no sea inferior a la media reciente (no tendría sentido)
         try:
             if prediccion_base < media_reciente_current:
+                # Registrar una nota visible en la sesión para auditoría/UI explicando
+                # que el valor mezclado fue sustituido por la media reciente.
+                try:
+                    fecha_key = fecha_str
+                except Exception:
+                    try:
+                        fecha_key = fecha_actual.strftime('%Y-%m-%d')
+                    except Exception:
+                        fecha_key = None
+                try:
+                    nota = (f"Se usó la media reciente (€{float(media_reciente_current):.2f}) porque "
+                            f"la mezcla previa (€{float(pred_before_decay) if pred_before_decay is not None else float(prediccion_base):.2f}) "
+                            "era inferior a la media reciente.")
+                except Exception:
+                    nota = "Se usó la media reciente porque la mezcla produjo un valor inferior a la media reciente."
+                try:
+                    if fecha_key:
+                        st.session_state.setdefault('base_notes', {})[fecha_key] = nota
+                except Exception:
+                    pass
                 prediccion_base = float(media_reciente_current)
         except Exception:
             pass
@@ -2575,6 +2716,54 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         df_prediccion[col] = df_prediccion[col].astype('string')
     return df_prediccion
 
+
+# Defensive wrapper to ensure callers always receive a pd.DataFrame.
+def safe_calcular_prediccion_semana(fecha_inicio_semana_date):
+    """Call `calcular_prediccion_semana` and coerce unexpected returns into
+    an empty DataFrame while recording diagnostics in `st.session_state`.
+    """
+    try:
+        res = calcular_prediccion_semana(fecha_inicio_semana_date)
+    except Exception as e:
+        try:
+            st.session_state['diag_pred_exception'] = str(e)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    # Expected: DataFrame
+    if isinstance(res, pd.DataFrame):
+        return res
+
+    # If a tuple is returned (observed in diagnostics as e.g. (float,str)),
+    # try to extract a DataFrame if present as first element; otherwise
+    # record diagnostics and return empty DataFrame to avoid AttributeError.
+    if isinstance(res, tuple):
+        try:
+            if len(res) > 0 and isinstance(res[0], pd.DataFrame):
+                try:
+                    st.session_state['diag_pred_return'] = f"tuple_first_is_df_len_{len(res)}"
+                except Exception:
+                    pass
+                return res[0]
+            # Log tuple types/preview for diagnosis
+            try:
+                st.session_state['diag_pred_return'] = 'tuple_types:' + ','.join([type(x).__name__ for x in res])
+                st.session_state['diag_pred_value_preview'] = str(res)[:200]
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    # None or unexpected type: log and return empty DataFrame
+    try:
+        st.session_state['diag_pred_return'] = f'unexpected_type_{type(res).__name__}'
+        st.session_state['diag_pred_value_preview'] = str(res)[:200]
+    except Exception:
+        pass
+    return pd.DataFrame()
+
 def generar_explicacion_dia(dia_semana_num, ventas_base, media_reciente, factor_tendencia, fecha_actual, base_year, current_year, tipo_evento, prediccion_base, ytd_factor, decay_factor):
     dia_nombre = DIAS_SEMANA[dia_semana_num]
     variacion_vs_base = ((media_reciente - ventas_base) / ventas_base) * 100 if ventas_base > 0 else 0
@@ -2790,7 +2979,7 @@ def generar_grafico_prediccion(df_pred_sem, df_hist_base_equiv, df_hist_current_
     pred_base_rows = []
     for semana_offset in range(5):  # 4 previas + semana actual
         monday_hist = fecha_inicio + timedelta(weeks=semana_offset)
-        df_temp = calcular_prediccion_semana(monday_hist.date())
+        df_temp = safe_calcular_prediccion_semana(monday_hist.date())
         if not df_temp.empty:
             for fecha, row in df_temp.iterrows():
                 if fecha != df_pred_final.index.max():  # excluir los 7 días finales
@@ -3364,8 +3553,21 @@ if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabl
     if 'df_prediccion' in st.session_state:
         del st.session_state.df_prediccion
     with st.spinner("Calculando predicción..."):
-        df_prediccion = calcular_prediccion_semana(fecha_inicio_seleccionada)
-    if df_prediccion.empty:
+        df_prediccion = safe_calcular_prediccion_semana(fecha_inicio_seleccionada)
+        # Normalize accidental tuple returns (e.g., (df, status)) to just the DataFrame
+        try:
+            if isinstance(df_prediccion, tuple) and len(df_prediccion) > 0:
+                maybe_df = df_prediccion[0]
+                if hasattr(maybe_df, 'empty'):
+                    df_prediccion = maybe_df
+        except Exception:
+            pass
+    # Defensive: ensure df_prediccion is a DataFrame-like object before checking .empty
+    try:
+        is_empty = df_prediccion.empty
+    except Exception:
+        is_empty = True
+    if is_empty:
         st.error("Ocurrió un error al generar la predicción. Revisa si tienes datos históricos suficientes.")
     else:
         st.session_state.df_prediccion = df_prediccion 
@@ -3412,6 +3614,14 @@ def color_factor_series(series):
 
 if display_results:
     df_prediccion = st.session_state.df_prediccion
+    # Normalize if session stored a tuple by mistake
+    try:
+        if isinstance(df_prediccion, tuple) and len(df_prediccion) > 0:
+            maybe_df = df_prediccion[0]
+            if hasattr(maybe_df, 'empty'):
+                df_prediccion = maybe_df
+    except Exception:
+        pass
     fecha_formateada = format_date_with_day(st.session_state.last_calculated_date)
     st.success(f"Predicción generada con éxito para la semana del {fecha_formateada}.")
     
