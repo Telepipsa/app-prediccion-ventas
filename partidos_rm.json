@@ -1,10 +1,10 @@
 {
-    "2024-01-03": {
+    "2024-03-01": {
         "partido": "Arandina vs Real Madrid (Copa del Rey Ronda 32)",
         "hora": "21:00"
     },
-    "2024-01-10": {
-        "partido": "Real Madrid vs Mallorca (Supercopa Semifinal)",
+    "2024-10-01": {
+        "partido": "Real Madrid vs Lille (Champions League Fase Liga)",
         "hora": "21:00"
     },
     "2024-01-14": {
@@ -19,11 +19,11 @@
         "partido": "Valencia vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-02-03": {
+    "2024-03-02": {
         "partido": "Real Madrid vs Atl\u00e9tico de Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-02-10": {
+    "2024-10-02": {
         "partido": "Vallecas vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
@@ -39,11 +39,11 @@
         "partido": "Sevilla vs Real Madrid (LaLiga)",
         "hora": "16:15"
     },
-    "2024-03-06": {
+    "2024-06-03": {
         "partido": "Real Sociedad vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-03-10": {
+    "2024-10-03": {
         "partido": "RB Leipzig vs Real Madrid (Champions Octavos Vuelta)",
         "hora": "21:00"
     },
@@ -55,7 +55,7 @@
         "partido": "Athletic Club vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-04-09": {
+    "2024-09-04": {
         "partido": "Real Madrid vs Alav\u00e9s (LaLiga)",
         "hora": "21:00"
     },
@@ -83,16 +83,16 @@
         "partido": "Getafe vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-05-04": {
+    "2024-04-05": {
         "partido": "Real Madrid vs C\u00e1diz (LaLiga)",
         "hora": "21:00"
     },
-    "2024-05-08": {
+    "2024-08-05": {
         "partido": "Real Sociedad vs Real Madrid (Copa del Rey Semifinal Vuelta)",
         "hora": "21:00"
     },
-    "2024-05-11": {
-        "partido": "Celta de Vigo vs Real Madrid (LaLiga)",
+    "2024-11-05": {
+        "partido": "Legan\u00e9s vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
     "2024-05-14": {
@@ -115,7 +115,7 @@
         "partido": "Osasuna vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-06-01": {
+    "2024-01-06": {
         "partido": "Real Madrid vs Real Sociedad (LaLiga)",
         "hora": "21:00"
     },
@@ -135,7 +135,7 @@
         "partido": "Real Madrid vs Betis (LaLiga)",
         "hora": "21:30"
     },
-    "2024-09-01": {
+    "2024-01-09": {
         "partido": "Real Sociedad vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
@@ -155,11 +155,11 @@
         "partido": "Atl\u00e9tico de Madrid vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-10-01": {
-        "partido": "Real Madrid vs Lille (Champions League Fase Liga)",
+    "2024-01-10": {
+        "partido": "Real Madrid vs Mallorca (Supercopa Semifinal)",
         "hora": "21:00"
     },
-    "2024-10-05": {
+    "2024-05-10": {
         "partido": "Real Madrid vs Villarreal (LaLiga)",
         "hora": "21:00"
     },
@@ -179,11 +179,11 @@
         "partido": "Real Madrid vs Osasuna (LaLiga)",
         "hora": "21:00"
     },
-    "2024-11-05": {
-        "partido": "Legan\u00e9s vs Real Madrid (LaLiga)",
+    "2024-05-11": {
+        "partido": "Celta de Vigo vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2024-11-09": {
+    "2024-09-11": {
         "partido": "Real Madrid vs Milan (Champions League Fase Liga)",
         "hora": "21:00"
     },
@@ -199,15 +199,15 @@
         "partido": "Real Madrid vs Rayo Vallecano (LaLiga)",
         "hora": "21:00"
     },
-    "2024-12-03": {
+    "2024-03-12": {
         "partido": "Real Madrid vs Atl\u00e9tico de Madrid (LaLiga) [Posible ajuste por Copa]",
         "hora": "21:00"
     },
-    "2024-12-07": {
+    "2024-07-12": {
         "partido": "Real Madrid vs Girona (Copa del Rey Ronda 32)",
         "hora": "21:00"
     },
-    "2024-12-10": {
+    "2024-10-12": {
         "partido": "Bilbao vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
@@ -223,15 +223,15 @@
         "partido": "Sevilla vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2025-01-03": {
-        "partido": "Valencia vs Real Madrid (LaLiga)",
+    "2025-03-01": {
+        "partido": "Real Madrid vs Betis (LaLiga)",
         "hora": "21:00"
     },
-    "2025-01-09": {
+    "2025-09-01": {
         "partido": "Real Madrid vs Mallorca (Supercopa Semifinal)",
         "hora": "21:00"
     },
-    "2025-01-12": {
+    "2025-12-01": {
         "partido": "Real Madrid vs FC Barcelona (Supercopa Final - si clasifica)",
         "hora": "20:00"
     },
@@ -251,19 +251,19 @@
         "partido": "Legan\u00e9s vs Real Madrid (Copa del Rey Octavos)",
         "hora": "21:00"
     },
-    "2025-02-01": {
+    "2025-01-02": {
         "partido": "Real Madrid vs Valencia (LaLiga)",
         "hora": "21:00"
     },
-    "2025-02-05": {
+    "2025-05-02": {
         "partido": "Osasuna vs Real Madrid (Copa del Rey Octavos)",
         "hora": "21:00"
     },
-    "2025-02-08": {
+    "2025-08-02": {
         "partido": "Real Madrid vs Getafe (LaLiga)",
         "hora": "21:00"
     },
-    "2025-02-12": {
+    "2025-12-02": {
         "partido": "Real Madrid vs Liverpool (Champions League Octavos Ida)",
         "hora": "21:00"
     },
@@ -283,21 +283,21 @@
         "partido": "Real Madrid vs Athletic Club (Copa del Rey Cuartos)",
         "hora": "21:00"
     },
-    "2025-03-01": {
-        "partido": "Real Madrid vs Betis (LaLiga)",
+    "2025-01-03": {
+        "partido": "Valencia vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2025-03-05": {
-        "partido": "FC Barcelona vs Real Madrid (Copa del Rey Cuartos)",
+    "2025-05-03": {
+        "partido": "Real Madrid vs Celta de Vigo (LaLiga)",
         "hora": "21:00"
     },
-    "2025-03-09": {
+    "2025-09-03": {
         "partido": "Real Madrid vs Liverpool (Champions League Octavos Vuelta)",
         "hora": "21:00"
     },
-    "2025-03-12": {
-        "partido": "Granada vs Real Madrid (LaLiga)",
-        "hora": "21:00"
+    "2025-12-03": {
+        "partido": "Athletic Club vs Real Madrid (LaLiga 25/26)",
+        "hora": "19:00"
     },
     "2025-03-15": {
         "partido": "Real Madrid vs Arsenal (Champions League Octavos Vuelta)",
@@ -307,19 +307,19 @@
         "partido": "Real Madrid vs Legan\u00e9s (LaLiga)",
         "hora": "21:00"
     },
-    "2025-04-02": {
+    "2025-02-04": {
         "partido": "Atl\u00e9tico de Madrid vs Real Madrid (Copa del Rey Semifinal Ida)",
         "hora": "21:00"
     },
-    "2025-04-05": {
+    "2025-05-04": {
         "partido": "Valladolid vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
-    "2025-04-09": {
+    "2025-09-04": {
         "partido": "Real Madrid vs Atl\u00e9tico de Madrid (Copa del Rey Semifinal Vuelta)",
         "hora": "21:00"
     },
-    "2025-04-12": {
+    "2025-12-04": {
         "partido": "Real Madrid vs Bayern M\u00fanich (Champions League Cuartos Ida)",
         "hora": "21:00"
     },
@@ -339,12 +339,12 @@
         "partido": "Real Madrid vs FC Barcelona (Copa del Rey Final)",
         "hora": "21:00"
     },
-    "2025-05-03": {
-        "partido": "Real Madrid vs Celta de Vigo (LaLiga)",
+    "2025-03-05": {
+        "partido": "FC Barcelona vs Real Madrid (Copa del Rey Cuartos)",
         "hora": "21:00"
     },
-    "2025-05-10": {
-        "partido": "Valencia vs Real Madrid (LaLiga)",
+    "2025-10-05": {
+        "partido": "Real Madrid vs Sevilla (LaLiga 25/26)",
         "hora": "21:00"
     },
     "2025-05-17": {
@@ -407,31 +407,31 @@
         "partido": "Betis vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
-    "2025-10-01": {
+    "2025-01-10": {
         "partido": "Real Madrid vs Inter de Mil\u00e1n (Champions League Fase Liga 25/26)",
         "hora": "21:00"
     },
-    "2025-10-05": {
-        "partido": "Real Madrid vs Sevilla (LaLiga 25/26)",
+    "2025-05-10": {
+        "partido": "Valencia vs Real Madrid (LaLiga)",
         "hora": "21:00"
     },
     "2025-10-19": {
-        "partido": "Real Madrid vs Athletic Club (LaLiga 25/26)",
+        "partido": "Getafe vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
     "2025-10-26": {
         "partido": "Real Madrid vs FC Barcelona (LaLiga 25/26)",
         "hora": "21:00"
     },
-    "2025-11-02": {
+    "2025-02-11": {
         "partido": "Villarreal vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
-    "2025-11-06": {
+    "2025-06-11": {
         "partido": "Real Madrid vs PSG (Champions League Fase Liga 25/26)",
         "hora": "21:00"
     },
-    "2025-11-09": {
+    "2025-09-11": {
         "partido": "Osasuna vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
@@ -447,24 +447,152 @@
         "partido": "Girona vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
-    "2025-12-03": {
-        "partido": "Real Madrid vs Rayo Vallecano (LaLiga 25/26)",
+    "2025-03-12": {
+        "partido": "Granada vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-07-12": {
+        "partido": "Real Madrid vs Celta de Vigo (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-10-12": {
+        "partido": "Real Madrid vs Manchester City (Champions League Fase Liga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-12-14": {
+        "partido": "Deportivo Alav\u00e9s vs Real Madrid (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-12-20": {
+        "partido": "Real Madrid vs Sevilla (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2024-01-03": {
+        "partido": "Arandina vs Real Madrid (Copa del Rey Ronda 32)",
+        "hora": "21:00"
+    },
+    "2024-02-03": {
+        "partido": "Real Madrid vs Atl\u00e9tico de Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-02-10": {
+        "partido": "Vallecas vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-06": {
+        "partido": "Real Sociedad vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-10": {
+        "partido": "RB Leipzig vs Real Madrid (Champions Octavos Vuelta)",
+        "hora": "21:00"
+    },
+    "2024-04-09": {
+        "partido": "Real Madrid vs Alav\u00e9s (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-05-04": {
+        "partido": "Real Madrid vs C\u00e1diz (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-05-08": {
+        "partido": "Real Sociedad vs Real Madrid (Copa del Rey Semifinal Vuelta)",
+        "hora": "21:00"
+    },
+    "2024-06-01": {
+        "partido": "Real Madrid vs Real Sociedad (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-09-01": {
+        "partido": "Real Sociedad vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-10-05": {
+        "partido": "Real Madrid vs Villarreal (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-11-09": {
+        "partido": "Real Madrid vs Milan (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-12-03": {
+        "partido": "Real Madrid vs Atl\u00e9tico de Madrid (LaLiga) [Posible ajuste por Copa]",
+        "hora": "21:00"
+    },
+    "2024-12-07": {
+        "partido": "Real Madrid vs Girona (Copa del Rey Ronda 32)",
+        "hora": "21:00"
+    },
+    "2024-12-10": {
+        "partido": "Bilbao vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-01-09": {
+        "partido": "Real Madrid vs Mallorca (Supercopa Semifinal)",
+        "hora": "21:00"
+    },
+    "2025-01-12": {
+        "partido": "Real Madrid vs FC Barcelona (Supercopa Final - si clasifica)",
+        "hora": "20:00"
+    },
+    "2025-02-01": {
+        "partido": "Real Madrid vs Valencia (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-02-05": {
+        "partido": "Osasuna vs Real Madrid (Copa del Rey Octavos)",
+        "hora": "21:00"
+    },
+    "2025-02-08": {
+        "partido": "Real Madrid vs Getafe (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-02-12": {
+        "partido": "Real Madrid vs Liverpool (Champions League Octavos Ida)",
+        "hora": "21:00"
+    },
+    "2025-03-09": {
+        "partido": "Real Madrid vs Liverpool (Champions League Octavos Vuelta)",
+        "hora": "21:00"
+    },
+    "2025-04-02": {
+        "partido": "Atl\u00e9tico de Madrid vs Real Madrid (Copa del Rey Semifinal Ida)",
+        "hora": "21:00"
+    },
+    "2025-04-05": {
+        "partido": "Valladolid vs Real Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-09": {
+        "partido": "Real Madrid vs Atl\u00e9tico de Madrid (Copa del Rey Semifinal Vuelta)",
+        "hora": "21:00"
+    },
+    "2025-04-12": {
+        "partido": "Real Madrid vs Bayern M\u00fanich (Champions League Cuartos Ida)",
+        "hora": "21:00"
+    },
+    "2025-10-01": {
+        "partido": "Real Madrid vs Inter de Mil\u00e1n (Champions League Fase Liga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-02": {
+        "partido": "Villarreal vs Real Madrid (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-06": {
+        "partido": "Real Madrid vs PSG (Champions League Fase Liga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-09": {
+        "partido": "Osasuna vs Real Madrid (LaLiga 25/26)",
         "hora": "21:00"
     },
     "2025-12-07": {
-        "partido": "Real Madrid vs Ajax (Champions League Fase Liga 25/26)",
+        "partido": "Real Madrid vs Celta de Vigo (LaLiga 25/26)",
         "hora": "21:00"
     },
     "2025-12-10": {
-        "partido": "Real Madrid vs Legan\u00e9s (LaLiga 25/26)",
-        "hora": "21:00"
-    },
-    "2025-12-13": {
-        "partido": "Granada vs Real Madrid (LaLiga 25/26)",
-        "hora": "21:00"
-    },
-    "2025-12-21": {
-        "partido": "Real Madrid vs Getafe (LaLiga 25/26)",
+        "partido": "Real Madrid vs Manchester City (Champions League Fase Liga 25/26)",
         "hora": "21:00"
     }
 }

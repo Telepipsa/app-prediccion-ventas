@@ -416,6 +416,113 @@ def cargar_datos_persistentes():
                 st.session_state.rm_matches = {}
         else:
             st.session_state.rm_matches = {}
+
+        # --- CARGA POR DEFECTO DESDE ARCHIVOS INCLUIDOS EN EL REPO ---
+        # Si no hay persistencia en disco (o está vacía), intentar cargar
+        # unas hojas Excel/CSV de arranque si están presentes en el repo.
+        try:
+            proyecto_root = os.path.dirname(os.path.abspath(__file__))
+
+            # ventas iniciales: 'venta.xlsx' o 'venta.csv'
+            if (st.session_state.df_historico.empty or 'df_historico' not in st.session_state) :
+                ventas_xlsx = os.path.join(proyecto_root, 'venta.xlsx')
+                ventas_csv = os.path.join(proyecto_root, 'venta.csv')
+                loaded = False
+                if os.path.exists(ventas_xlsx):
+                    try:
+                        dfv = pd.read_excel(ventas_xlsx)
+                        if 'fecha' in dfv.columns and 'ventas' in dfv.columns:
+                            dfv['fecha'] = pd.to_datetime(dfv['fecha'], errors='coerce')
+                            dfv = dfv.dropna(subset=['fecha'])
+                            dfv['ventas'] = pd.to_numeric(dfv['ventas'], errors='coerce')
+                            dfv = dfv[dfv['ventas'] > 0]
+                            dfv = dfv.set_index('fecha').sort_index()
+                            dfv = dfv[~dfv.index.duplicated(keep='last')]
+                            st.session_state.df_historico = dfv
+                            loaded = True
+                    except Exception:
+                        loaded = False
+                if (not loaded) and os.path.exists(ventas_csv):
+                    try:
+                        dfv = pd.read_csv(ventas_csv, parse_dates=['fecha'])
+                        if 'fecha' in dfv.columns and 'ventas' in dfv.columns:
+                            dfv = dfv.dropna(subset=['fecha'])
+                            dfv['ventas'] = pd.to_numeric(dfv['ventas'], errors='coerce')
+                            dfv = dfv[dfv['ventas'] > 0]
+                            dfv = dfv.set_index('fecha').sort_index()
+                            dfv = dfv[~dfv.index.duplicated(keep='last')]
+                            st.session_state.df_historico = dfv
+                    except Exception:
+                        pass
+
+            # eventos iniciales: 'FECHAS IMPORTANTES APP.xlsx' or 'eventos.xlsx'
+            if not st.session_state.get('eventos'):
+                eventos_xlsx = os.path.join(proyecto_root, 'FECHAS IMPORTANTES APP.xlsx')
+                eventos_alt = os.path.join(proyecto_root, 'eventos.xlsx')
+                if os.path.exists(eventos_xlsx) or os.path.exists(eventos_alt):
+                    path = eventos_xlsx if os.path.exists(eventos_xlsx) else eventos_alt
+                    try:
+                        dfe = pd.read_excel(path)
+                        # intentar inferir columnas similares a procesar_archivo_eventos
+                        cols_l = {c.lower(): c for c in dfe.columns}
+                        fecha_col = cols_l.get('fecha', None) or cols_l.get('date', None)
+                        venta_col = cols_l.get('venta', None) or cols_l.get('ventas', None) or cols_l.get('venta_real', None)
+                        nombre_col = cols_l.get('nombre', None) or cols_l.get('descripcion', None) or cols_l.get('evento', None)
+                        eventos_dict = {}
+                        if fecha_col is not None and nombre_col is not None:
+                            for _, r in dfe.iterrows():
+                                try:
+                                    fd = pd.to_datetime(r[fecha_col], errors='coerce')
+                                    if pd.isna(fd):
+                                        continue
+                                    fecha_s = fd.strftime('%Y-%m-%d')
+                                    eventos_dict[fecha_s] = {'descripcion': str(r.get(nombre_col, ''))}
+                                    if venta_col and venta_col in dfe.columns:
+                                        try:
+                                            eventos_dict[fecha_s]['ventas_reales_evento'] = float(r.get(venta_col, np.nan))
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    continue
+                            if eventos_dict:
+                                st.session_state.eventos = eventos_dict
+                    except Exception:
+                        pass
+
+            # partidos FCB y RM: 'PARTIDOS FCB.xlsx' / 'PARTIDOS RM.xlsx'
+            fcb_xlsx = os.path.join(proyecto_root, 'PARTIDOS FCB.xlsx')
+            rm_xlsx = os.path.join(proyecto_root, 'PARTIDOS RM.xlsx')
+            def load_partidos(path):
+                try:
+                    dfp = pd.read_excel(path)
+                    cols_l = {c.lower(): c for c in dfp.columns}
+                    fecha_col = cols_l.get('fecha', None) or cols_l.get('date', None) or list(dfp.columns)[0]
+                    partido_col = cols_l.get('partido', None) or cols_l.get('match', None) or (list(dfp.columns)[1] if len(dfp.columns) > 1 else None)
+                    partidos = {}
+                    for ix, r in dfp.iterrows():
+                        try:
+                            fd = pd.to_datetime(r[fecha_col], errors='coerce')
+                            if pd.isna(fd):
+                                continue
+                            fecha_s = fd.strftime('%Y-%m-%d')
+                            hora = None
+                            if isinstance(r[fecha_col], str):
+                                m = re.search(r"(\d{1,2}:\d{2})", r[fecha_col])
+                                if m:
+                                    hora = m.group(1)
+                            partidos[fecha_s] = {'partido': str(r.get(partido_col, '')) if partido_col else '' , 'hora': hora}
+                        except Exception:
+                            continue
+                    return partidos
+                except Exception:
+                    return {}
+
+            if (not st.session_state.get('fcb_matches')) and os.path.exists(fcb_xlsx):
+                st.session_state.fcb_matches = load_partidos(fcb_xlsx)
+            if (not st.session_state.get('rm_matches')) and os.path.exists(rm_xlsx):
+                st.session_state.rm_matches = load_partidos(rm_xlsx)
+        except Exception:
+            pass
         
         st.session_state.datos_cargados = True
         st.session_state.show_delete_modal = False
@@ -1569,7 +1676,24 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         except Exception:
             base_val_usada = None
 
-        ultimas_4_semanas = df_current_hist[df_current_hist.index.weekday == dia_semana_num].sort_index(ascending=False).head(4)
+        # Para Lunes-Jueves excluimos festivos y vísperas de la serie usada
+        try:
+            if dia_semana_num in (0, 1, 2, 3):
+                try:
+                    mask_no_fest_visp = ~df_current_hist.index.to_series().apply(lambda d: bool(es_festivo(d) or es_vispera_de_festivo(d)))
+                    df_current_clean = df_current_hist[mask_no_fest_visp]
+                    candidates = df_current_clean[df_current_clean.index.weekday == dia_semana_num]
+                    # Fallback si tras filtrar no hay datos: usar la serie original
+                    if candidates.empty:
+                        candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+                except Exception:
+                    candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+            else:
+                candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+        except Exception:
+            candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+
+        ultimas_4_semanas = candidates.sort_index(ascending=False).head(4)
         media_reciente_current = ultimas_4_semanas['ventas'].mean() if not ultimas_4_semanas.empty else ventas_base
         if pd.isna(media_reciente_current): media_reciente_current = 0.0
         
@@ -1582,37 +1706,49 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         except Exception:
             media_ajustada_tendencia = media_reciente_current if media_reciente_current is not None else 0.0
 
-        # Aplicar factores a la BASE histórica (según especificación):
-        # - la tendencia reciente (factor_tendencia),
-        # - el factor mensual/decay (decay_factor) según posición en el mes,
-        # - y el ajuste anual (YTD) sólo en la rama con YTD.
-        # La media reciente se debe usar SIN ajustar por tendencia; la mezcla 30/70
-        # se calcula entre la base (ya ajustada por los factores) y la media reciente.
-
-        # obtener decay_factor antes de la mezcla (depende de la semana del mes)
+        # NUEVO: Aplicar TODOS los factores a la BASE histórica UNA VEZ y usar
+        # esa `ventas_base_adjusted` en todas las mezclas posteriores.
+        # Factores aplicados: factor_tendencia, month_factor (si existe), decay_factor y ytd_factor.
         wom = week_of_month_custom(fecha_actual)
         decay_factor = decay_factors.get(wom, 1.0)
 
-        # aplicar tendencia y decay/mes a la base histórica
         try:
-            ventas_base_trended = ventas_base * factor_tendencia
+            mf = month_factor if 'month_factor' in locals() else 1.0
         except Exception:
-            ventas_base_trended = ventas_base
-        try:
-            ventas_base_trended_month = ventas_base_trended * (month_factor if 'month_factor' in locals() else 1.0) * decay_factor
-        except Exception:
-            ventas_base_trended_month = ventas_base_trended
+            mf = 1.0
 
-        # version con YTD aplicada sobre la base ya transformada
+        # calcular la versión intermedia (sin YTD) para auditoría y compatibilidad
         try:
-            ventas_base_ajustada_ytd = ventas_base_trended_month * ytd_factor
+            ventas_base_trended_month = float(ventas_base) * float(factor_tendencia) * float(mf) * float(decay_factor)
         except Exception:
-            ventas_base_ajustada_ytd = ventas_base_trended_month
+            try:
+                ventas_base_trended_month = float(ventas_base)
+            except Exception:
+                ventas_base_trended_month = 0.0
 
-        # media reciente SIN ajustar por tendencia (usar media_reciente_current tal cual)
-        # Calculamos las mezclas 30/70 usando la base transformada y la media reciente
-        pred_mix_with_ytd = (ventas_base_ajustada_ytd * 0.3) + (media_reciente_current * 0.7)
-        pred_mix_no_ytd = (ventas_base_trended_month * 0.3) + (media_reciente_current * 0.7)
+        # versión con YTD aplicada (equivalente a la base final ajustada)
+        try:
+            ventas_base_ajustada_ytd = ventas_base_trended_month * float(ytd_factor)
+        except Exception:
+            try:
+                ventas_base_ajustada_ytd = float(ventas_base_trended_month)
+            except Exception:
+                ventas_base_ajustada_ytd = 0.0
+
+        # mantener `ventas_base_adjusted` como sinónimo de la versión con YTD
+        ventas_base_adjusted = ventas_base_ajustada_ytd
+
+        # Generar mezclas usando la base ya ajustada (no volver a aplicar trend/YTD/decay más adelante)
+        # 50/50 (base vs media reciente)
+        pred_mix_50_50 = (ventas_base_adjusted * 0.5) + (media_reciente_current * 0.5)
+        # 30/70 (ejemplo: base 30% + media 70%) - se deja por transparencia
+        pred_mix_30_70 = (ventas_base_adjusted * 0.3) + (media_reciente_current * 0.7)
+        # 70/30 (base 70% + media 30%) - alternativa por si se necesita
+        pred_mix_70_30 = (ventas_base_adjusted * 0.7) + (media_reciente_current * 0.3)
+
+        # Mantener nombres antiguos para compatibilidad con el resto del código
+        pred_mix_with_ytd = pred_mix_50_50
+        pred_mix_no_ytd = pred_mix_50_50
 
         impacto_evento = 1.0
         tipo_evento = "Día Normal"
@@ -1651,8 +1787,8 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         # - Para días normales NO aplicamos el ajuste YTD (está reflejado en la media reciente y la base),
         #   sólo aplicamos el factor por posición en el mes (decay_factor) posteriormente.
         try:
-            # Excepción: en diciembre damos más peso a la base histórica
-            # (70% base / 30% media reciente) SOLO para días normales
+            # Excepción: en diciembre damos peso equilibrado a la base histórica
+            # (50% base / 50% media reciente) SOLO para días normales
             # (no festivos, no eventos manuales, no vísperas). Los festivos
             # y vísperas conservan sus reglas y porcentajes habituales.
             if is_evento_manual or is_festivo_auto or is_vispera:
@@ -1660,8 +1796,8 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             else:
                 try:
                     if fecha_actual.month == 12:
-                        # invertir peso para diciembre en días normales
-                        prediccion_base_ajustada = float((ventas_base_trended_month * 0.7) + (media_reciente_current * 0.3))
+                        # mezclar 50/50 en diciembre para días normales
+                        prediccion_base_ajustada = float(pred_mix_50_50)
                     else:
                         prediccion_base_ajustada = float(pred_mix_no_ytd)
                 except Exception:
@@ -2230,6 +2366,31 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     if media_fcb_vs is not None:
                         impacto_fcb = 1.0 + (float(media_fcb_vs) / 100.0)
                         fcb_source_used = 'media_fcb_vs'
+                        # Si el partido de hoy tiene hora entre 16:00 y 18:30, atenuar
+                        # el impacto en un 90% (tanto si es positivo como negativo).
+                        try:
+                            hora_val = None
+                            if isinstance(fcb_match_today, dict):
+                                hora_val = fcb_match_today.get('hora')
+                            elif isinstance(fcb_match_today, str):
+                                m = re.search(r"(\d{1,2}:\d{2})", fcb_match_today)
+                                hora_val = m.group(1) if m else None
+                            if hora_val:
+                                try:
+                                    t = datetime.strptime(hora_val.strip(), '%H:%M').time()
+                                    t_min = datetime.strptime('16:00', '%H:%M').time()
+                                    t_max = datetime.strptime('18:30', '%H:%M').time()
+                                    if t_min <= t <= t_max:
+                                        impacto_fcb = 1.0 + (impacto_fcb - 1.0) * 0.05
+                                        fcb_source_used = (fcb_source_used or '') + ' (hora_atenuada)'
+                                        try:
+                                            tipo_evento = (tipo_evento or '') + ' + Partido(hora atenuada)'
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     else:
                         # Si no hay media histórica por rival, no aplicamos ajuste FCB
                         impacto_fcb = 1.0
@@ -2391,6 +2552,33 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     if media_rm_vs is not None:
                         impacto_rm = 1.0 + (float(media_rm_vs) / 100.0)
                         rm_source_used = 'media_rm_vs'
+                        # Atenuar impacto RM en 90% si el partido de hoy empieza entre 16:00 y 18:30
+                        try:
+                            hora_val_rm = None
+                            if isinstance(rm_match_today, dict):
+                                hora_val_rm = rm_match_today.get('hora')
+                            elif isinstance(rm_match_today, str):
+                                m2 = re.search(r"(\d{1,2}:\d{2})", rm_match_today)
+                                hora_val_rm = m2.group(1) if m2 else None
+                            if hora_val_rm:
+                                try:
+                                    t_rm = datetime.strptime(hora_val_rm.strip(), '%H:%M').time()
+                                    t_min = datetime.strptime('16:00', '%H:%M').time()
+                                    t_max = datetime.strptime('18:30', '%H:%M').time()
+                                    if t_min <= t_rm <= t_max:
+                                        impacto_rm = 1.0 + (impacto_rm - 1.0) * 0.05
+                                        rm_source_used = (rm_source_used or '') + ' (hora_atenuada)'
+                                        try:
+                                            if 'RM' in (tipo_evento or '').upper():
+                                                tipo_evento = (tipo_evento or '') + ' + Partido(hora atenuada)'
+                                            else:
+                                                tipo_evento = (tipo_evento or '') + ' + RM(hora atenuada)'
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     else:
                         impacto_rm = 1.0
                         rm_source_used = None
@@ -3569,6 +3757,23 @@ if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabl
         is_empty = True
     if is_empty:
         st.error("Ocurrió un error al generar la predicción. Revisa si tienes datos históricos suficientes.")
+        # Mostrar diagnósticos si existen (útil para depuración en entorno local)
+        try:
+            diag_exc = st.session_state.get('diag_pred_exception', None)
+            diag_ret = st.session_state.get('diag_pred_return', None)
+            diag_preview = st.session_state.get('diag_pred_value_preview', None)
+            if diag_exc:
+                st.subheader('Diagnóstico: excepción interna')
+                st.code(str(diag_exc))
+            if diag_ret or diag_preview:
+                st.subheader('Diagnóstico: retorno inesperado')
+                if diag_ret:
+                    st.write('Tipo/estado detectado:', diag_ret)
+                if diag_preview:
+                    st.write('Vista previa del valor retornado:')
+                    st.write(diag_preview)
+        except Exception:
+            pass
     else:
         st.session_state.df_prediccion = df_prediccion 
         st.session_state.last_calculated_date = fecha_inicio_seleccionada
@@ -4208,7 +4413,7 @@ if display_results:
         st.write(display_df)
     # Nota: para recordar la regla especial de diciembre
     try:
-        st.markdown("* Para los días de diciembre la base histórica tiene un peso del 70% y la media reciente del 30%.")
+        st.markdown("* Para los días de diciembre la base histórica tiene un peso del 50% y la media reciente del 50%.")
     except Exception:
         pass
     # --- Nueva tabla: detalles de la Base Histórica usada por fila ---
