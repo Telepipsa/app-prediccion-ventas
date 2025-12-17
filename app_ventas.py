@@ -1814,32 +1814,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         # Ya hemos aplicado el decay_factor a la base antes de la mezcla,
         # por tanto no volver a multiplicar aquí (evita aplicar decay dos veces).
         prediccion_base = prediccion_base_ajustada
-        # Asegurar que la predicción no sea inferior a la media reciente (no tendría sentido)
-        try:
-            if prediccion_base < media_reciente_current:
-                # Registrar una nota visible en la sesión para auditoría/UI explicando
-                # que el valor mezclado fue sustituido por la media reciente.
-                try:
-                    fecha_key = fecha_str
-                except Exception:
-                    try:
-                        fecha_key = fecha_actual.strftime('%Y-%m-%d')
-                    except Exception:
-                        fecha_key = None
-                try:
-                    nota = (f"Se usó la media reciente (€{float(media_reciente_current):.2f}) porque "
-                            f"la mezcla previa (€{float(pred_before_decay) if pred_before_decay is not None else float(prediccion_base):.2f}) "
-                            "era inferior a la media reciente.")
-                except Exception:
-                    nota = "Se usó la media reciente porque la mezcla produjo un valor inferior a la media reciente."
-                try:
-                    if fecha_key:
-                        st.session_state.setdefault('base_notes', {})[fecha_key] = nota
-                except Exception:
-                    pass
-                prediccion_base = float(media_reciente_current)
-        except Exception:
-            pass
+        # Nota: ya no forzamos que la predicción sea al menos la media reciente.
+        # La regla anterior que sustituía la mezcla por `media_reciente_current`
+        # se ha eliminado a petición del usuario para mantener la mezcla resultante.
         # guardar predicción antes de clipping para auditoría
         try:
             pred_before_clipping = float(prediccion_base)
@@ -4265,7 +4242,25 @@ if display_results:
         # Calcular diferencia contra la estimación final (FCB si existe)
         reales_numeric = pd.to_numeric(df_prediccion_display['Ventas Reales'], errors='coerce')
         df_prediccion_display['Diferencia'] = reales_numeric - pd.to_numeric(df_prediccion_display.get(final_col, df_prediccion_display['Estimación sin Partido']), errors='coerce')
-        df_prediccion_display['Diferencia_display'] = df_prediccion_display['Diferencia'].apply(lambda x: PLACEHOLDER_STR if pd.isna(x) else f"{x:+.0f}€ {'↑' if x > 0 else '↓'}")
+        # porcentaje relativo a la estimación final (evitar división por cero)
+        est_numeric = pd.to_numeric(df_prediccion_display.get(final_col, df_prediccion_display['Estimación sin Partido']), errors='coerce')
+        def format_diff(row):
+            x = row['Diferencia']
+            est = row.get(final_col) if final_col in row.index else row.get('Estimación sin Partido')
+            try:
+                if pd.isna(x) or pd.isna(est) or float(est) == 0:
+                    return PLACEHOLDER_STR
+                pct = (float(x) / float(est)) * 100.0
+                # format euro and arrow
+                arrow = '↑' if x > 0 else '↓'
+                euro_str = f"{x:+.0f}€"
+                # format percent using one decimal and comma as decimal separator
+                pct_str = f"{pct:+.1f}%".replace('.', ',')
+                return f"{euro_str} {arrow} ({pct_str})"
+            except Exception:
+                return PLACEHOLDER_STR
+
+        df_prediccion_display['Diferencia_display'] = df_prediccion_display.apply(format_diff, axis=1)
     else:
         col_order = base_cols
     # Añadir columnas avanzadas si el usuario lo solicita
