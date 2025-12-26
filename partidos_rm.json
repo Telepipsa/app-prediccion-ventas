@@ -594,5 +594,21 @@
     "2025-12-10": {
         "partido": "Real Madrid vs Manchester City (Champions League Fase Liga 25/26)",
         "hora": "21:00"
+    },
+    "2026-01-04": {
+        "partido": "Betis vs Real Madrid (LaLiga)",
+        "hora": "16:15"
+    },
+    "2026-01-08": {
+        "partido": "Atl\u00e9tico de Madrid vs Real Madrid (Supercopa de Espa\u00f1a)",
+        "hora": "20:00"
+    },
+    "2026-01-17": {
+        "partido": "Real Madrid vs Levante UD (LaLiga 25/26)",
+        "hora": "14:00"
+    },
+    "2026-01-20": {
+        "partido": "Real Madrid vs M\u00f3naco (Champions League Fase Liga 25/26)",
+        "hora": "21:00"
     }
 }

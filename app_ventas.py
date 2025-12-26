@@ -1260,6 +1260,10 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
 
     df_base = df_historico[df_historico.index.year == BASE_YEAR].copy()
     df_current_hist = df_historico[(df_historico.index.year == CURRENT_YEAR) & (df_historico.index < fecha_inicio_semana)]
+    # Serie usada para cálculos de "media reciente": incluir todas las fechas
+    # anteriores a la semana objetivo (permitir cruzar el límite de año). Esto
+    # evita que en primeras semanas de enero no haya suficientes muestras.
+    df_recent_hist = df_historico[df_historico.index < fecha_inicio_semana]
     
     ytd_factor = 1.0
     if not df_current_hist.empty:
@@ -1678,20 +1682,23 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
 
         # Para Lunes-Jueves excluimos festivos y vísperas de la serie usada
         try:
+            # Para la media reciente usamos `df_recent_hist` (todas las fechas
+            # previas a la semana objetivo) para permitir calcular medias al
+            # cruzar el límite de año (ej. primera semana de enero).
             if dia_semana_num in (0, 1, 2, 3):
                 try:
-                    mask_no_fest_visp = ~df_current_hist.index.to_series().apply(lambda d: bool(es_festivo(d) or es_vispera_de_festivo(d)))
-                    df_current_clean = df_current_hist[mask_no_fest_visp]
+                    mask_no_fest_visp = ~df_recent_hist.index.to_series().apply(lambda d: bool(es_festivo(d) or es_vispera_de_festivo(d)))
+                    df_current_clean = df_recent_hist[mask_no_fest_visp]
                     candidates = df_current_clean[df_current_clean.index.weekday == dia_semana_num]
                     # Fallback si tras filtrar no hay datos: usar la serie original
                     if candidates.empty:
-                        candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+                        candidates = df_recent_hist[df_recent_hist.index.weekday == dia_semana_num]
                 except Exception:
-                    candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+                    candidates = df_recent_hist[df_recent_hist.index.weekday == dia_semana_num]
             else:
-                candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+                candidates = df_recent_hist[df_recent_hist.index.weekday == dia_semana_num]
         except Exception:
-            candidates = df_current_hist[df_current_hist.index.weekday == dia_semana_num]
+            candidates = df_recent_hist[df_recent_hist.index.weekday == dia_semana_num]
 
         ultimas_4_semanas = candidates.sort_index(ascending=False).head(4)
         media_reciente_current = ultimas_4_semanas['ventas'].mean() if not ultimas_4_semanas.empty else ventas_base

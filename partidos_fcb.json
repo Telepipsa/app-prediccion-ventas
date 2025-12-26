@@ -1,0 +1,490 @@
+{
+    "2024-04-01": {
+        "partido": "Las Palmas vs FC Barcelona (LaLiga)",
+        "hora": "21:30"
+    },
+    "2024-10-01": {
+        "partido": "FC Barcelona vs Young Boys (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-01-14": {
+        "partido": "Real Madrid vs FC Barcelona (Supercopa Final)",
+        "hora": "20:00"
+    },
+    "2024-01-21": {
+        "partido": "Athletic Club vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-01-24": {
+        "partido": "Athletic Club vs FC Barcelona (Copa del Rey Cuartos)",
+        "hora": "21:30"
+    },
+    "2024-01-28": {
+        "partido": "FC Barcelona vs Villarreal (LaLiga)",
+        "hora": "18:30"
+    },
+    "2024-11-02": {
+        "partido": "FC Barcelona vs Granada (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-02-13": {
+        "partido": "Napoli vs FC Barcelona (Champions Octavos Ida)",
+        "hora": "21:00"
+    },
+    "2024-02-17": {
+        "partido": "Celta de Vigo vs FC Barcelona (LaLiga)",
+        "hora": "18:30"
+    },
+    "2024-03-03": {
+        "partido": "Athletic Club vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-10-03": {
+        "partido": "FC Barcelona vs Mallorca (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-12-03": {
+        "partido": "FC Barcelona vs Napoli (Champions Octavos Vuelta)",
+        "hora": "21:00"
+    },
+    "2024-03-17": {
+        "partido": "Atl\u00e9tico de Madrid vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-31": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-10-04": {
+        "partido": "Paris Saint-Germain vs FC Barcelona (Champions Cuartos Ida)",
+        "hora": "21:00"
+    },
+    "2024-04-16": {
+        "partido": "FC Barcelona vs Paris Saint-Germain (Champions Cuartos Vuelta)",
+        "hora": "21:00"
+    },
+    "2024-04-21": {
+        "partido": "Real Madrid vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-04-28": {
+        "partido": "FC Barcelona vs Valencia (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-05-13": {
+        "partido": "FC Barcelona vs Real Sociedad (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-05-19": {
+        "partido": "Almer\u00eda vs FC Barcelona (LaLiga)",
+        "hora": "19:00"
+    },
+    "2024-05-26": {
+        "partido": "Sevilla vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-08-17": {
+        "partido": "Valencia vs FC Barcelona (LaLiga)",
+        "hora": "21:30"
+    },
+    "2024-08-24": {
+        "partido": "FC Barcelona vs Athletic Club (LaLiga)",
+        "hora": "17:00"
+    },
+    "2024-08-27": {
+        "partido": "Rayo Vallecano vs FC Barcelona (LaLiga)",
+        "hora": "21:30"
+    },
+    "2024-08-31": {
+        "partido": "FC Barcelona vs Real Valladolid (LaLiga)",
+        "hora": "17:00"
+    },
+    "2024-09-15": {
+        "partido": "Girona vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-09-17": {
+        "partido": "AS M\u00f3naco vs FC Barcelona (Champions League Fase Liga)",
+        "hora": "18:45"
+    },
+    "2024-09-22": {
+        "partido": "FC Barcelona vs Villarreal (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-09-25": {
+        "partido": "FC Barcelona vs Getafe (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-09-29": {
+        "partido": "Osasuna vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-01-10": {
+        "partido": "FC Barcelona vs Osasuna (Supercopa Semifinal)",
+        "hora": "20:00"
+    },
+    "2024-06-10": {
+        "partido": "Alav\u00e9s vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-10-20": {
+        "partido": "FC Barcelona vs Sevilla (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-10-23": {
+        "partido": "FC Barcelona vs Bayern M\u00fanich (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-10-26": {
+        "partido": "Real Madrid vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-11": {
+        "partido": "FC Barcelona vs Espanyol (LaLiga)",
+        "hora": "16:15"
+    },
+    "2024-06-11": {
+        "partido": "Estrella Roja vs FC Barcelona (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-10-11": {
+        "partido": "Real Sociedad vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-11-24": {
+        "partido": "Celta de Vigo vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-11-26": {
+        "partido": "FC Barcelona vs Brest (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-01-12": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-07-12": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-12-15": {
+        "partido": "FC Barcelona vs Legan\u00e9s (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-12-21": {
+        "partido": "FC Barcelona vs Atl\u00e9tico de Madrid (LaLiga)",
+        "hora": "17:30"
+    },
+    "2025-11-01": {
+        "partido": "FC Barcelona vs Athletic Club (Supercopa Semifinal)",
+        "hora": "20:00"
+    },
+    "2025-12-01": {
+        "partido": "Real Madrid vs FC Barcelona (Supercopa Final - si clasifica)",
+        "hora": "20:00"
+    },
+    "2025-01-19": {
+        "partido": "Rayo Vallecano vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-01-22": {
+        "partido": "Benfica vs FC Barcelona (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2025-01-26": {
+        "partido": "Valencia vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-01-29": {
+        "partido": "FC Barcelona vs Borussia Dortmund (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2025-02-02": {
+        "partido": "FC Barcelona vs Atl\u00e9tico de Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-09-02": {
+        "partido": "Getafe vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-02-16": {
+        "partido": "FC Barcelona vs Celta de Vigo (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-02-23": {
+        "partido": "Rayo Vallecano vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-02-03": {
+        "partido": "FC Barcelona vs Mallorca (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-09-03": {
+        "partido": "Real Sociedad vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-03-16": {
+        "partido": "Atl\u00e9tico de Madrid vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-03-30": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-04": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-13": {
+        "partido": "FC Barcelona vs C\u00e1diz (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-20": {
+        "partido": "Sevilla vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-27": {
+        "partido": "FC Barcelona vs Valencia (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-05": {
+        "partido": "Girona vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-11-05": {
+        "partido": "FC Barcelona vs Real Sociedad (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-05-14": {
+        "partido": "Athletic Club vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-05-18": {
+        "partido": "Rayo Vallecano vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-05-25": {
+        "partido": "FC Barcelona vs Getafe (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-01-06": {
+        "partido": "Osasuna vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-08-06": {
+        "partido": "FC Barcelona vs Almer\u00eda (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-15": {
+        "partido": "FC Barcelona vs Atl\u00e9tico de Madrid (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-22": {
+        "partido": "Granada vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-29": {
+        "partido": "FC Barcelona vs Mallorca (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-08-17": {
+        "partido": "Mallorca vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-08-24": {
+        "partido": "Levante vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-08-31": {
+        "partido": "Rayo Vallecano vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-09-14": {
+        "partido": "FC Barcelona vs Valencia (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-09-21": {
+        "partido": "FC Barcelona vs Getafe (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-09-28": {
+        "partido": "Valencia vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-05-10": {
+        "partido": "FC Barcelona vs Sevilla (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-10-19": {
+        "partido": "Almer\u00eda vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-10-26": {
+        "partido": "Real Madrid vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-02-11": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-09-11": {
+        "partido": "FC Barcelona vs Real Sociedad (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-22": {
+        "partido": "FC Barcelona vs Athletic Club (LaLiga 25/26)",
+        "hora": "16:15"
+    },
+    "2025-11-25": {
+        "partido": "Chelsea vs FC Barcelona (Champions 25/26 Fase Liga)",
+        "hora": "21:00"
+    },
+    "2025-11-29": {
+        "partido": "FC Barcelona vs Alav\u00e9s (LaLiga 25/26)",
+        "hora": "16:15"
+    },
+    "2025-02-12": {
+        "partido": "FC Barcelona vs Atl\u00e9tico de Madrid (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-06-12": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga 25/26)",
+        "hora": "18:30"
+    },
+    "2025-09-12": {
+        "partido": "FC Barcelona vs Eintracht Frankfurt (Champions 25/26 Fase Liga)",
+        "hora": "21:00"
+    },
+    "2025-12-13": {
+        "partido": "FC Barcelona vs Osasuna (LaLiga 25/26)",
+        "hora": "18:30"
+    },
+    "2025-12-21": {
+        "partido": "Villarreal vs FC Barcelona (LaLiga 25/26)",
+        "hora": "16:15"
+    },
+    "2024-01-04": {
+        "partido": "Las Palmas vs FC Barcelona (LaLiga)",
+        "hora": "21:30"
+    },
+    "2024-02-11": {
+        "partido": "FC Barcelona vs Granada (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-10": {
+        "partido": "FC Barcelona vs Mallorca (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-03-12": {
+        "partido": "FC Barcelona vs Napoli (Champions Octavos Vuelta)",
+        "hora": "21:00"
+    },
+    "2024-04-10": {
+        "partido": "Paris Saint-Germain vs FC Barcelona (Champions Cuartos Ida)",
+        "hora": "21:00"
+    },
+    "2024-10-06": {
+        "partido": "Alav\u00e9s vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-11-03": {
+        "partido": "FC Barcelona vs Espanyol (LaLiga)",
+        "hora": "16:15"
+    },
+    "2024-11-06": {
+        "partido": "Estrella Roja vs FC Barcelona (Champions League Fase Liga)",
+        "hora": "21:00"
+    },
+    "2024-11-10": {
+        "partido": "Real Sociedad vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-12-01": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga)",
+        "hora": "21:00"
+    },
+    "2024-12-07": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-01-11": {
+        "partido": "FC Barcelona vs Athletic Club (Supercopa Semifinal)",
+        "hora": "20:00"
+    },
+    "2025-01-12": {
+        "partido": "Real Madrid vs FC Barcelona (Supercopa Final - si clasifica)",
+        "hora": "20:00"
+    },
+    "2025-02-09": {
+        "partido": "Getafe vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-03-02": {
+        "partido": "FC Barcelona vs Mallorca (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-03-09": {
+        "partido": "Real Sociedad vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-04-06": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-05-04": {
+        "partido": "Girona vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-05-11": {
+        "partido": "FC Barcelona vs Real Sociedad (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-01": {
+        "partido": "Osasuna vs FC Barcelona (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-06-08": {
+        "partido": "FC Barcelona vs Almer\u00eda (LaLiga)",
+        "hora": "21:00"
+    },
+    "2025-10-05": {
+        "partido": "FC Barcelona vs Sevilla (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-02": {
+        "partido": "FC Barcelona vs Las Palmas (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-11-09": {
+        "partido": "FC Barcelona vs Real Sociedad (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-12-02": {
+        "partido": "FC Barcelona vs Atl\u00e9tico de Madrid (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2025-12-06": {
+        "partido": "Real Betis vs FC Barcelona (LaLiga 25/26)",
+        "hora": "18:30"
+    },
+    "2025-12-09": {
+        "partido": "FC Barcelona vs Eintracht Frankfurt (Champions 25/26 Fase Liga)",
+        "hora": "21:00"
+    },
+    "2026-01-03": {
+        "partido": "Espanyol vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2026-01-07": {
+        "partido": "FC Barcelona vs Athletic Club (Supercopa de Espa\u00f1a)",
+        "hora": "20:00"
+    },
+    "2026-01-18": {
+        "partido": "Real Sociedad vs FC Barcelona (LaLiga 25/26)",
+        "hora": "21:00"
+    },
+    "2026-01-21": {
+        "partido": "Slavia Praha vs FC Barcelona (Champions 25/26 Fase Liga)",
+        "hora": "21:00"
+    }
+}
