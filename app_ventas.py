@@ -33,6 +33,7 @@ import urllib.parse
 import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25 
 import re
 import unicodedata
+import requests
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -394,7 +395,9 @@ def cargar_datos_persistentes():
             try:
                 with open(ARCHIVOS_PERSISTENCIA['eventos'], 'r', encoding='utf-8') as f:
                     st.session_state.eventos = json.load(f)
-            except json.JSONDecodeError:
+            except Exception:
+                # Evitar referenciar `json` aquí en caso de que esté inaccesible;
+                # cualquier error al leer/parsear se maneja estableciendo diccionario vacío.
                 st.session_state.eventos = {}
         else:
             st.session_state.eventos = {}
@@ -403,7 +406,7 @@ def cargar_datos_persistentes():
             try:
                 with open(ARCHIVOS_PERSISTENCIA['partidos'], 'r', encoding='utf-8') as f:
                     st.session_state.fcb_matches = json.load(f)
-            except json.JSONDecodeError:
+            except Exception:
                 st.session_state.fcb_matches = {}
         else:
             st.session_state.fcb_matches = {}
@@ -412,7 +415,7 @@ def cargar_datos_persistentes():
             try:
                 with open(ARCHIVOS_PERSISTENCIA['partidos_rm'], 'r', encoding='utf-8') as f:
                     st.session_state.rm_matches = json.load(f)
-            except json.JSONDecodeError:
+            except Exception:
                 st.session_state.rm_matches = {}
         else:
             st.session_state.rm_matches = {}
@@ -618,6 +621,188 @@ def procesar_archivo_eventos(archivo):
         return eventos_dict
     except Exception as e:
         st.error(f"Error procesando el archivo de eventos: {e}")
+
+
+def fetch_precipitation_open_meteo(latitude, longitude, start_date, end_date, timezone='Europe/Madrid'):
+    """Descarga precipitación diaria (mm) entre start_date y end_date (inclusive).
+    Devuelve un dict fecha (datetime.date) -> precip_mm (float). Usa Open-Meteo
+    archive endpoint para histórico y forecast endpoint para hoy/futuro.
+    """
+    try:
+        from datetime import datetime as _dt, date as _d
+        res = {}
+        today = _dt.now().date()
+        # Accept either date or datetime-like inputs
+        if isinstance(start_date, (_dt, _d)):
+            s = start_date.date() if isinstance(start_date, _dt) else start_date
+        else:
+            s = _dt.fromisoformat(str(start_date)).date()
+        if isinstance(end_date, (_dt, _d)):
+            e = end_date.date() if isinstance(end_date, _dt) else end_date
+        else:
+            e = _dt.fromisoformat(str(end_date)).date()
+
+        def _get_with_retry(url, timeout=20, retries=2):
+            last_exc = None
+            for attempt in range(retries):
+                try:
+                    r = requests.get(url, timeout=timeout)
+                    r.raise_for_status()
+                    return r
+                except Exception as ex:
+                    last_exc = ex
+                    time.sleep(0.5)
+            raise last_exc
+
+        # Histórico (archive) para fechas < hoy
+        hist_end = min(e, today - timedelta(days=1)) if s <= today - timedelta(days=1) else None
+        if hist_end and s <= hist_end:
+            url = (
+                "https://archive-api.open-meteo.com/v1/archive"
+                f"?latitude={latitude}&longitude={longitude}&start_date={s}&end_date={hist_end}"
+                "&daily=precipitation_sum&timezone=" + urllib.parse.quote(timezone)
+            )
+            try:
+                r = _get_with_retry(url)
+                j = r.json()
+            except Exception as ex:
+                try:
+                    st.session_state['diag_precip_error'] = f"archive_failed:{url} -> {ex}"
+                except Exception:
+                    pass
+                j = {}
+            times = j.get('daily', {}).get('time', [])
+            vals = j.get('daily', {}).get('precipitation_sum', [])
+            for t, v in zip(times, vals):
+                try:
+                    d = _dt.fromisoformat(t).date()
+                    res[d] = float(v) if v is not None else 0.0
+                except Exception:
+                    continue
+
+        # Forecast / recent (forecast endpoint) para fechas >= hoy
+        fc_start = max(s, today)
+        if fc_start <= e:
+            url2 = (
+                "https://api.open-meteo.com/v1/forecast"
+                f"?latitude={latitude}&longitude={longitude}&start_date={fc_start}&end_date={e}"
+                "&daily=precipitation_sum&timezone=" + urllib.parse.quote(timezone)
+            )
+            try:
+                r2 = _get_with_retry(url2)
+                j2 = r2.json()
+            except Exception as ex:
+                try:
+                    st.session_state['diag_precip_error'] = f"forecast_failed:{url2} -> {ex}"
+                except Exception:
+                    pass
+                j2 = {}
+            times2 = j2.get('daily', {}).get('time', [])
+            vals2 = j2.get('daily', {}).get('precipitation_sum', [])
+            for t, v in zip(times2, vals2):
+                try:
+                    d = _dt.fromisoformat(t).date()
+                    res[d] = float(v) if v is not None else 0.0
+                except Exception:
+                    continue
+
+        return res
+    except Exception as e:
+        try:
+            st.session_state['diag_precip_error'] = str(e)
+        except Exception:
+            pass
+        return res
+
+
+def enrich_historico_with_precip():
+    """Aplica el mapa de precipitación (si existe en session_state) al df_historico.
+    Añade columnas `precip_mm` (float) y `Lluvia` (bool) y guarda en session_state.
+    """
+    try:
+        precip_map = st.session_state.get('precip_map', {})
+        df_hist = st.session_state.get('df_historico', pd.DataFrame())
+        if df_hist is None or df_hist.empty:
+            return
+        if not precip_map:
+            return
+        df = df_hist.copy()
+        df['precip_mm'] = df.index.to_series().apply(lambda d: precip_map.get(d.date(), None))
+        df['precip_mm'] = pd.to_numeric(df['precip_mm'], errors='coerce').fillna(0.0)
+        # Consider rain only when precipitation exceeds threshold (mm)
+        RAIN_THRESHOLD_MM = 2.5
+        df['Lluvia'] = df['precip_mm'] > RAIN_THRESHOLD_MM
+        st.session_state.df_historico = df
+        # Guardar estadística simple de impacto por weekday para uso posterior
+        try:
+            ventas_num = pd.to_numeric(df['ventas'], errors='coerce')
+            wd_stats = {}
+            # prepare prediction map if available
+            df_pred = st.session_state.get('df_prediccion', pd.DataFrame())
+            pred_map = {}
+            try:
+                if isinstance(df_pred, pd.DataFrame) and not df_pred.empty:
+                    # ensure keys are date objects for lookup
+                    for idx, row in df_pred.iterrows():
+                        try:
+                            dkey = pd.to_datetime(idx).date()
+                            pred_map[dkey] = float(row.get('ventas_predichas', np.nan))
+                        except Exception:
+                            continue
+            except Exception:
+                pred_map = {}
+
+            global_difs = []
+            for wd in range(7):
+                sub = df[df.index.weekday == wd]
+                mean_r = sub[sub['Lluvia'] == True]['ventas'].dropna().mean()
+                mean_n = sub[sub['Lluvia'] == False]['ventas'].dropna().mean()
+
+                # compute impact using prediction baseline when available for rainy days
+                impact = None
+                try:
+                    rain_rows = sub[sub['Lluvia'] == True]
+                    difs = []
+                    for idx, row in rain_rows.iterrows():
+                        dkey = idx.date()
+                        if dkey in pred_map and pred_map[dkey] not in (None, np.nan) and pred_map[dkey] != 0:
+                            v = row.get('ventas', np.nan)
+                            p = pred_map[dkey]
+                            if pd.notna(v):
+                                difs.append((float(v) - float(p)) / float(p))
+                    if difs:
+                        impact = float(np.mean(difs))
+                        # accumulate global difs for overall impact
+                        global_difs.extend(difs)
+                    else:
+                        # fallback to historical mean comparison
+                        if pd.notna(mean_r) and pd.notna(mean_n) and mean_n > 0:
+                            impact = (mean_r - mean_n) / mean_n
+                except Exception:
+                    impact = None
+
+                wd_stats[wd] = {'mean_rain': mean_r, 'mean_no': mean_n, 'impact_pct': impact}
+
+            st.session_state['rain_impact_by_weekday'] = wd_stats
+            # overall impact: mean of positive difs only (ventas vs pred) when available
+            try:
+                if 'global_difs' in locals() and global_difs:
+                    positives = [g for g in global_difs if g is not None and not pd.isna(g) and g > 0]
+                    if positives:
+                        st.session_state['rain_impact_overall_pct'] = float(np.mean(positives))
+                    else:
+                        # fallback: take positive weekday impacts only
+                        pos_vals = [v['impact_pct'] for v in wd_stats.values() if v['impact_pct'] is not None and v['impact_pct'] > 0]
+                        st.session_state['rain_impact_overall_pct'] = float(np.mean(pos_vals)) if pos_vals else None
+                else:
+                    pos_vals = [v['impact_pct'] for v in wd_stats.values() if v['impact_pct'] is not None and v['impact_pct'] > 0]
+                    st.session_state['rain_impact_overall_pct'] = float(np.mean(pos_vals)) if pos_vals else None
+            except Exception:
+                st.session_state['rain_impact_overall_pct'] = None
+        except Exception:
+            st.session_state['rain_impact_by_weekday'] = {}
+    except Exception:
+        pass
         return None
 
 def procesar_archivo_partidos(archivo):
@@ -3461,6 +3646,72 @@ def mostrar_indicador_crecimiento():
 # --- Inicialización de la App ---
 cargar_datos_persistentes()
 
+# Intento silencioso de enriquecer histórico con precipitación al iniciar (solo histórico, no forecast)
+def auto_enrich_hist_on_startup():
+    """Enriquecer automáticamente el histórico con lluvia al arrancar.
+    - Incluye pronóstico 2 semanas (igual que el botón manual).
+    - Ejecuta solo una vez por sesión (flag `precip_auto_done`).
+    - No lanza excepciones al UI; deja diagnóstico en `st.session_state`.
+    """
+    try:
+        if st.session_state.get('precip_auto_done', False):
+            return
+        df_hist = st.session_state.get('df_historico', pd.DataFrame())
+        if not isinstance(df_hist, pd.DataFrame) or df_hist.empty:
+            return
+        # Si ya contiene columna 'Lluvia' y map guardado, no rehacer
+        if ('Lluvia' in df_hist.columns and 'precip_mm' in df_hist.columns) and st.session_state.get('precip_map'):
+            st.session_state['precip_auto_done'] = True
+            return
+
+        start = df_hist.index.min().date()
+        end = df_hist.index.max().date() + timedelta(days=14)  # incluir pronóstico 2 semanas
+        LAT, LON = 41.1189, 1.2445
+        try:
+            # Mostrar spinner durante la descarga en el primer render
+            with st.spinner('Enriqueciendo histórico con datos de lluvia (histórico + 2 semanas)...'):
+                precip_map = fetch_precipitation_open_meteo(LAT, LON, start, end)
+            if precip_map:
+                st.session_state['precip_map'] = precip_map
+                enrich_historico_with_precip()
+                st.session_state['precip_auto_done'] = True
+            else:
+                # dejar diagnóstico para el usuario
+                st.session_state['diag_precip_error'] = st.session_state.get('diag_precip_error', 'no_data_returned')
+        except Exception as e:
+            try:
+                st.session_state['diag_precip_error'] = str(e)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Mostrar tarjeta de impacto medio por lluvia (si está calculado)
+def mostrar_impacto_lluvia():
+    try:
+        impact = st.session_state.get('rain_impact_overall_pct', None)
+        if impact is None:
+            return
+        # formato: +3.4% o -2.1%
+        sign = '+' if impact >= 0 else ''
+        pct_str = f"{sign}{impact*100:.1f}%" if abs(impact) < 100 else f"{sign}{impact:.1f}%"
+        # Small styled card similar to mostrar_indicador_crecimiento
+        html = f'''\
+        <div style="display:inline-block;margin-top:10px;padding:8px 12px;border-radius:10px;background:#e6f2ff;border:1px solid #cfe7ff;min-width:120px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial;">\
+          <div style="font-size:1rem;font-weight:700;color:#0b63b6;">🌧️ Impacto lluvia</div>\
+          <div style="font-size:1.1rem;font-weight:800;color:#034a86;margin-top:4px;">{pct_str}</div>\
+        </div>\
+        '''
+        st.markdown(html, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+# Ejecutar enriquecimiento inicial silencioso
+try:
+    auto_enrich_hist_on_startup()
+except Exception:
+    pass
+
 # =============================================================================
 # INTERFAZ DE USUARIO (Streamlit)
 # =============================================================================
@@ -3481,6 +3732,42 @@ if st.session_state.get('autenticado', False):
 st.sidebar.title("📈 Optimización de Ventas")
 st.sidebar.markdown("Herramienta para predecir ventas y optimizar costes de personal.")
 
+# Debug: mostrar métricas de impacto de lluvia
+with st.sidebar.expander("Debug lluvia (interno)", expanded=False):
+    try:
+        st.write('rain_impact_overall_pct', st.session_state.get('rain_impact_overall_pct'))
+        st.write('rain_impact_by_weekday', st.session_state.get('rain_impact_by_weekday'))
+        if st.button('Listar difs usadas (días con lluvia vs pred)', key='btn_show_rain_difs'):
+            try:
+                df = st.session_state.get('df_historico', pd.DataFrame())
+                df_pred = st.session_state.get('df_prediccion', pd.DataFrame())
+                pred_map = {}
+                if isinstance(df_pred, pd.DataFrame) and not df_pred.empty:
+                    for idx, row in df_pred.iterrows():
+                        try:
+                            pred_map[pd.to_datetime(idx).date()] = float(row.get('ventas_predichas', np.nan))
+                        except Exception:
+                            continue
+                difs = []
+                if not df.empty:
+                    for idx, row in df.iterrows():
+                        try:
+                            if float(row.get('precip_mm', 0.0)) > 2.5:
+                                d = idx.date()
+                                if d in pred_map and pred_map[d] not in (None, np.nan) and pred_map[d] != 0:
+                                    v = row.get('ventas', np.nan)
+                                    p = pred_map[d]
+                                    if pd.notna(v):
+                                        difs.append((float(v) - float(p)) / float(p))
+                        except Exception:
+                            continue
+                st.write('difs_count', len(difs))
+                st.write(difs)
+            except Exception as e:
+                st.write('error', str(e))
+    except Exception:
+        pass
+
 st.sidebar.header("1. Cargar Datos Históricos de Ventas")
 st.sidebar.markdown("Sube tus archivos CSV o Excel (columnas: 'fecha', 'ventas') para *todos* los años. Los datos se fusionarán en un histórico único.")
 
@@ -3493,10 +3780,37 @@ if uploader_historico:
         guardar_datos('ventas')
         st.sidebar.success("Datos históricos cargados y guardados.")
 
+    # Botón para descargar/enriquecer histórico con precipitación usando Open-Meteo
+    if st.sidebar.button("Enriquecer histórico con datos de lluvia (Open-Meteo)"):
+        try:
+            df_hist = st.session_state.get('df_historico', pd.DataFrame())
+            if df_hist is None or df_hist.empty:
+                st.sidebar.error("No hay datos históricos cargados. Primero sube un archivo de ventas.")
+            else:
+                start = df_hist.index.min().date()
+                end = df_hist.index.max().date() + timedelta(days=14)  # incluir pronóstico 2 semanas
+                LAT, LON = 41.1189, 1.2445  # Tarragona
+                # `st.sidebar` does not expose `spinner()`; use top-level `st.spinner`
+                with st.spinner('Descargando datos de lluvia (histórico + 2 semanas)...'):
+                    precip_map = fetch_precipitation_open_meteo(LAT, LON, start, end)
+                if not precip_map:
+                    diag = st.session_state.get('diag_precip_error', None)
+                    if diag:
+                        st.sidebar.error(f'No se pudieron obtener datos de lluvia ({diag}).')
+                    else:
+                        st.sidebar.error('No se pudieron obtener datos de lluvia. Revisa la conexión o inténtalo más tarde.')
+                else:
+                    st.session_state['precip_map'] = precip_map
+                    enrich_historico_with_precip()
+                    st.sidebar.success('Histórico enriquecido y pronóstico guardado en sesión.')
+        except Exception as e:
+            st.sidebar.error(f"Error al enriquecer histórico con lluvia: {e}")
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("##### Añadir / Editar Venta Manual")
 with st.sidebar.form("form_venta_manual"):
-    fecha_manual = st.date_input("Fecha", value=datetime.today().date())
+    # Use pandas Timestamp to avoid relying on `datetime` name being present
+    fecha_manual = st.date_input("Fecha", value=pd.Timestamp.today().date())
     ventas_manual = st.number_input("Venta neta (€)", min_value=0.0, step=0.01, format="%.2f")
     submitted_manual = st.form_submit_button("Guardar Venta")
     if submitted_manual:
@@ -3697,6 +4011,308 @@ with cols_title[1]:
         mostrar_indicador_crecimiento()
     except Exception:
         pass
+    try:
+        mostrar_impacto_lluvia()
+    except Exception:
+        pass
+
+# Tabla de histórico de lluvia: muestra ventas históricas, predicción (si existe), lluvia y dif_lluvia
+def mostrar_tabla_historico_lluvia():
+    try:
+        df_hist = st.session_state.get('df_historico', pd.DataFrame()).copy()
+        if df_hist is None or df_hist.empty:
+            return
+
+        # Asegurar columnas
+        if 'precip_mm' not in df_hist.columns:
+            df_hist['precip_mm'] = 0.0
+        if 'Lluvia' not in df_hist.columns:
+            RAIN_THRESHOLD_MM = 2.5
+            df_hist['Lluvia'] = df_hist['precip_mm'] > RAIN_THRESHOLD_MM
+
+        # Selectores de año y mes
+        years = sorted(pd.DatetimeIndex(df_hist.index).year.unique().tolist())
+        if not years:
+            return
+        cols = st.columns([1,1,6])
+        with cols[0]:
+            sel_year = st.selectbox('Año', options=years, index=len(years)-1 if years else 0, key='tabla_lluvia_year')
+        with cols[1]:
+            import calendar
+            meses = list(range(1,13))
+            month_names = [calendar.month_name[m] for m in meses]
+            today = pd.Timestamp.today()
+            default_month = today.month if today.year == sel_year else 1
+            sel_month = st.selectbox('Mes', options=meses, format_func=lambda m: calendar.month_name[m], index=default_month-1, key='tabla_lluvia_month')
+
+        # Construir rango de días para el mes seleccionado
+        start = pd.Timestamp(year=int(sel_year), month=int(sel_month), day=1)
+        end = (start + pd.offsets.MonthEnd(0)).date()
+        rng = pd.date_range(start=start, end=end)
+
+        # Predicciones posibles (no sobrescribimos la predicción principal aquí)
+        df_pred = st.session_state.get('df_prediccion', pd.DataFrame())
+        # Opcional: mostrar diagnósticos para entender por qué no aparecen predicciones
+        show_pred_diag = False
+        try:
+            show_pred_diag = st.sidebar.checkbox("Mostrar diagnóstico de predicción (tabla lluvia)", value=False, key='diag_tabla_pred')
+        except Exception:
+            show_pred_diag = False
+
+        # --- Diagnóstico de precipitación: compara archive vs forecast y valores en sesión/histórico
+        try:
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**Diagnóstico lluvia (comparar fuentes)**")
+            diag_date = st.sidebar.date_input("Fecha a diagnosticar (lluvia)", value=pd.Timestamp.today().date(), key='diag_precip_date')
+            if st.sidebar.button('Comprobar lluvia para fecha', key='btn_diag_precip'):
+                LAT, LON = 41.1189, 1.2445
+                sd = diag_date.strftime('%Y-%m-%d')
+                ed = sd
+                archive_url = f"https://archive-api.open-meteo.com/v1/archive?latitude={LAT}&longitude={LON}&start_date={sd}&end_date={ed}&daily=precipitation_sum&timezone=Europe/Madrid"
+                forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&start_date={sd}&end_date={ed}&daily=precipitation_sum&timezone=Europe/Madrid"
+                st.sidebar.write(f"Consultar Open‑Meteo archive:\n`{archive_url}`")
+                st.sidebar.write(f"Consultar Open‑Meteo forecast:\n`{forecast_url}`")
+                try:
+                    r1 = requests.get(archive_url, timeout=15)
+                    j1 = r1.json() if r1.status_code == 200 else {'error': f'status_{r1.status_code}'}
+                except Exception as e:
+                    j1 = {'error': str(e)}
+                try:
+                    r2 = requests.get(forecast_url, timeout=15)
+                    j2 = r2.json() if r2.status_code == 200 else {'error': f'status_{r2.status_code}'}
+                except Exception as e:
+                    j2 = {'error': str(e)}
+                st.sidebar.markdown('**Respuesta archive (daily.precipitation_sum)**')
+                try:
+                    times = j1.get('daily', {}).get('time', [])
+                    vals = j1.get('daily', {}).get('precipitation_sum', [])
+                    st.sidebar.write(list(zip(times, vals)))
+                except Exception:
+                    st.sidebar.write(j1)
+                st.sidebar.markdown('**Respuesta forecast (daily.precipitation_sum)**')
+                try:
+                    times2 = j2.get('daily', {}).get('time', [])
+                    vals2 = j2.get('daily', {}).get('precipitation_sum', [])
+                    st.sidebar.write(list(zip(times2, vals2)))
+                except Exception:
+                    st.sidebar.write(j2)
+
+                # Mostrar lo que la app tiene guardado
+                try:
+                    pmap = st.session_state.get('precip_map', {}) or {}
+                    v_map = pmap.get(diag_date, pmap.get(sd, None))
+                    st.sidebar.markdown('**Valor en st.session_state[precip_map]**')
+                    st.sidebar.write(v_map)
+                except Exception:
+                    pass
+                try:
+                    dfh = st.session_state.get('df_historico', pd.DataFrame())
+                    val_hist = None
+                    if isinstance(dfh, pd.DataFrame) and not dfh.empty:
+                        if pd.Timestamp(diag_date) in dfh.index and 'precip_mm' in dfh.columns:
+                            val_hist = dfh.loc[pd.Timestamp(diag_date), 'precip_mm']
+                    st.sidebar.markdown('**Valor en df_historico[precip_mm]**')
+                    st.sidebar.write(val_hist)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Construir un mapa inicial desde df_pred existente (si lo hay)
+        pred_map = {}
+        try:
+            if isinstance(df_pred, pd.DataFrame) and not df_pred.empty:
+                for idx, row in df_pred.iterrows():
+                    try:
+                        ts = pd.Timestamp(idx)
+                        key = ts.date()
+                        # Prefer columna 'ventas_predichas'
+                        if isinstance(row, pd.Series):
+                            if 'ventas_predichas' in row:
+                                v = row['ventas_predichas']
+                            elif 'ventas' in row:
+                                v = row['ventas']
+                            else:
+                                try:
+                                    v = float(row.iloc[0])
+                                except Exception:
+                                    v = None
+                        else:
+                            try:
+                                v = float(row)
+                            except Exception:
+                                v = None
+                        pred_map[key] = None if v is None or (isinstance(v, float) and pd.isna(v)) else float(v)
+                    except Exception:
+                        continue
+        except Exception:
+            pred_map = {}
+
+        # Si faltan predicciones para fechas del mes mostrado, calcular automáticamente
+        try:
+            missing_dates = [d.date() for d in rng if d.date() not in pred_map]
+            if missing_dates:
+                # calcular Mondays que cubren el rango: empezando por el lunes de la semana de 'start'
+                start_date = pd.Timestamp(start).date()
+                end_date = pd.Timestamp(end).date()
+                start_monday = start_date - timedelta(days=start_date.weekday())
+                mondays = []
+                cur = start_monday
+                while cur <= end_date:
+                    mondays.append(cur)
+                    cur = cur + timedelta(days=7)
+                # Ejecutar safe_calcular_prediccion_semana para cada lunes y rellenar pred_map con los 7 días
+                with st.spinner('Calculando predicciones de muestra para el mes mostrado...'):
+                    combined = []
+                    for m in mondays:
+                        try:
+                            df_week = safe_calcular_prediccion_semana(m)
+                            if isinstance(df_week, pd.DataFrame) and not df_week.empty:
+                                combined.append(df_week)
+                        except Exception:
+                            continue
+                    if combined:
+                        try:
+                            df_comb = pd.concat(combined)
+                            if show_pred_diag:
+                                try:
+                                    st.sidebar.markdown('**Diagnóstico predicción (auto calculada)**')
+                                    st.sidebar.write('df_pred (session) — head:')
+                                    st.sidebar.write(df_pred.head())
+                                    st.sidebar.write('df_comb (concat auto):')
+                                    st.sidebar.write(df_comb.head())
+                                    st.sidebar.write('Index types:')
+                                    st.sidebar.write({
+                                        'df_pred_index_type': str(type(df_pred.index[0])) if hasattr(df_pred, 'index') and len(df_pred.index)>0 else 'none',
+                                        'df_comb_index_type': str(type(df_comb.index[0])) if hasattr(df_comb, 'index') and len(df_comb.index)>0 else 'none'
+                                    })
+                                except Exception:
+                                    pass
+                            for idx, row in df_comb.iterrows():
+                                try:
+                                    key = pd.Timestamp(idx).date()
+                                    if isinstance(row, pd.Series):
+                                        if 'ventas_predichas' in row:
+                                            v = row['ventas_predichas']
+                                        elif 'ventas' in row:
+                                            v = row['ventas']
+                                        else:
+                                            try:
+                                                v = float(row.iloc[0])
+                                            except Exception:
+                                                v = None
+                                    else:
+                                        try:
+                                            v = float(row)
+                                        except Exception:
+                                            v = None
+                                    if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                                        pred_map[key] = float(v)
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Stats weekday
+        wd_stats = st.session_state.get('rain_impact_by_weekday', {})
+
+        rows = []
+        for d in rng:
+            row = {'fecha': d.date()}
+            # historico ventas
+            try:
+                ventas = float(df_hist.loc[d, 'ventas']) if d in df_hist.index else float('nan')
+            except Exception:
+                ventas = float('nan')
+            # prediccion (lookup en pred_map por date o ISO)
+            try:
+                lookup_date = d.date()
+                lookup_iso = lookup_date.strftime('%Y-%m-%d')
+                pred = pred_map.get(lookup_date, pred_map.get(lookup_iso, float('nan')))
+            except Exception:
+                pred = float('nan')
+            # precipitación en mm: preferir columna en el histórico, si no, usar mapa de precipitación (precip_map)
+            precip_mm = None
+            try:
+                if d in df_hist.index and 'precip_mm' in df_hist.columns:
+                    val = df_hist.loc[d, 'precip_mm']
+                    precip_mm = None if pd.isna(val) else float(val)
+                else:
+                    pmap = st.session_state.get('precip_map', {}) or {}
+                    iso = d.date().strftime('%Y-%m-%d')
+                    # intentar keys por date o por ISO string
+                    precip_mm = pmap.get(d.date(), pmap.get(iso, None))
+                    if precip_mm is not None:
+                        try:
+                            precip_mm = float(precip_mm)
+                        except Exception:
+                            precip_mm = None
+            except Exception:
+                precip_mm = None
+
+            # lluvia (flag) calculada a partir de precip_mm usando umbral
+            RAIN_THRESHOLD_MM = 2.5
+            try:
+                lluvia = False
+                if precip_mm is not None and not pd.isna(precip_mm):
+                    lluvia = float(precip_mm) > RAIN_THRESHOLD_MM
+            except Exception:
+                lluvia = False
+
+            # baseline: prefer Predicción if present, otherwise use mean_no (weekday no-rain mean)
+            mean_no = None
+            try:
+                wd = int(d.weekday())
+                w = wd_stats.get(wd, {})
+                mean_no = w.get('mean_no', None)
+            except Exception:
+                mean_no = None
+
+            # dif_lluvia: porcentaje relativo respecto a la `Predicción` si existe,
+            # en su defecto respecto a `mean_no`. Fórmula: (ventas - baseline) / baseline * 100
+            dif_lluvia = None
+            try:
+                # elegir baseline: preferir pred (si no es NaN), luego mean_no
+                baseline = None
+                if pred is not None and not pd.isna(pred):
+                    baseline = float(pred)
+                elif mean_no is not None and not pd.isna(mean_no):
+                    baseline = float(mean_no)
+
+                if lluvia and pd.notna(ventas) and baseline is not None and baseline != 0.0:
+                    dif_lluvia = (ventas - float(baseline)) / float(baseline) * 100.0
+            except Exception:
+                dif_lluvia = None
+
+            rows.append({
+                'Fecha': d.date(),
+                'Ventas Histórica': ventas,
+                'Predicción': pred,
+                'Lluvia': 'Sí' if lluvia else 'No',
+                'Precipitación (mm)': precip_mm,
+                'Dif_Lluvia (%)': dif_lluvia
+            })
+
+        df_display = pd.DataFrame(rows).set_index('Fecha')
+        # Formatear columnas numéricas
+        if 'Ventas Histórica' in df_display.columns:
+            df_display['Ventas Histórica'] = df_display['Ventas Histórica'].apply(lambda x: (None if pd.isna(x) else round(float(x), 2)))
+        if 'Predicción' in df_display.columns:
+            df_display['Predicción'] = df_display['Predicción'].apply(lambda x: (None if x is None or pd.isna(x) else round(float(x), 2)))
+        if 'Precipitación (mm)' in df_display.columns:
+            df_display['Precipitación (mm)'] = df_display['Precipitación (mm)'].apply(lambda x: (None if x is None or pd.isna(x) else round(float(x), 2)))
+        if 'Dif_Lluvia (%)' in df_display.columns:
+            df_display['Dif_Lluvia (%)'] = df_display['Dif_Lluvia (%)'].apply(lambda x: (None if x is None or pd.isna(x) else round(float(x), 2)))
+
+        st.markdown('**Histórico: Ventas vs Lluvia (por día)**')
+        st.data_editor(df_display, height=300, use_container_width=True, key='tabla_historico_lluvia')
+    except Exception as e:
+        try:
+            st.session_state['diag_tabla_lluvia_err'] = str(e)
+        except Exception:
+            pass
 
 with st.sidebar:
     vista_compacta = st.checkbox("👉 Vista Compacta (solo 7 días en gráfica de líneas - recomendado para móvil)", value=False, help="Activa para ver solo la semana de predicción en la gráfica de líneas, ideal para pantallas pequeñas.")
@@ -3724,6 +4340,37 @@ calculo_final_disponible = calculo_disponible
 if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabled=not calculo_final_disponible):
     if 'df_prediccion' in st.session_state:
         del st.session_state.df_prediccion
+    # Ensure precipitation enrichment exists before heavy calculation: try auto-enrich if missing
+    try:
+        df_hist_try = st.session_state.get('df_historico', pd.DataFrame())
+        need_precip = False
+        if isinstance(df_hist_try, pd.DataFrame) and not df_hist_try.empty:
+            # If no precip_map or historical precip_mm column missing or all zeros, attempt enrich
+            pmap_exists = bool(st.session_state.get('precip_map'))
+            has_precip_col = 'precip_mm' in df_hist_try.columns and df_hist_try['precip_mm'].sum() > 0
+            if not pmap_exists or not has_precip_col:
+                need_precip = True
+        if need_precip:
+            try:
+                start = df_hist_try.index.min().date()
+                end = df_hist_try.index.max().date() + timedelta(days=14)
+                LAT, LON = 41.1189, 1.2445
+                with st.spinner('Comprobando/descargando datos de lluvia antes del cálculo...'):
+                    precip_map = fetch_precipitation_open_meteo(LAT, LON, start, end)
+                if precip_map:
+                    st.session_state['precip_map'] = precip_map
+                    enrich_historico_with_precip()
+                else:
+                    # leave diagnostic info for UI
+                    st.session_state['diag_precip_error'] = st.session_state.get('diag_precip_error', 'no_data_returned')
+            except Exception as e:
+                try:
+                    st.session_state['diag_precip_error'] = str(e)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     with st.spinner("Calculando predicción..."):
         df_prediccion = safe_calcular_prediccion_semana(fecha_inicio_seleccionada)
         # Normalize accidental tuple returns (e.g., (df, status)) to just the DataFrame
@@ -4018,16 +4665,66 @@ if display_results:
     try:
         cols_ctrl = st.columns([1,1,6])
         with cols_ctrl[0]:
-            show_fcb = st.checkbox('Mostrar columnas FCB', value=True, key='show_fcb_columns')
+            show_fcb = st.checkbox('Mostrar columnas FCB', value=False, key='show_fcb_columns')
         with cols_ctrl[1]:
-            show_rm = st.checkbox('Mostrar columnas RM', value=True, key='show_rm_columns')
+            show_rm = st.checkbox('Mostrar columnas RM', value=False, key='show_rm_columns')
     except Exception:
         # fallback si el render está fuera del contexto de st
-        show_fcb = st.session_state.get('show_fcb_columns', True)
-        show_rm = st.session_state.get('show_rm_columns', True)
-
+        show_fcb = st.session_state.get('show_fcb_columns', False)
+        show_rm = st.session_state.get('show_rm_columns', False)
     df_prediccion_display = df_prediccion.reset_index()
-    df_prediccion_display['dia_semana'] = df_prediccion_display['dia_semana'] + ' ' + df_prediccion_display['fecha'].dt.strftime('%d')
+    # Preparar mapa de precipitación (normalizar claves a date)
+    pmap_raw = st.session_state.get('precip_map', {}) or {}
+    pmap = {}
+    try:
+        for k, v in pmap_raw.items():
+            try:
+                if isinstance(k, str):
+                    kd = pd.to_datetime(k).date()
+                elif isinstance(k, (pd.Timestamp, datetime)):
+                    kd = pd.to_datetime(k).date()
+                else:
+                    kd = k
+                pmap[kd] = float(v) if v is not None and not pd.isna(v) else 0.0
+            except Exception:
+                continue
+    except Exception:
+        pmap = {}
+
+    df_hist_local = st.session_state.get('df_historico', pd.DataFrame())
+
+    def _has_rain_for_date(d):
+        try:
+            if d in pmap:
+                return pmap.get(d, 0.0) > 2.5
+            # fallback to historic df if available
+            if isinstance(df_hist_local, pd.DataFrame) and not df_hist_local.empty:
+                idx = pd.to_datetime(d)
+                if idx in df_hist_local.index:
+                    try:
+                        return float(df_hist_local.loc[idx, 'precip_mm']) > 2.5
+                    except Exception:
+                        return False
+            return False
+        except Exception:
+            return False
+
+    # Añadir icono 🌧️ si hubo lluvia o hay predicción de lluvia para esa fecha
+    def _annotate_row(row):
+        try:
+            daynum = row['fecha'].strftime('%d') if hasattr(row['fecha'], 'strftime') else pd.to_datetime(row['fecha']).strftime('%d')
+            label = f"{row['dia_semana']} {daynum}"
+            try:
+                ddate = row['fecha'].date() if hasattr(row['fecha'], 'date') else pd.to_datetime(row['fecha']).date()
+            except Exception:
+                ddate = pd.to_datetime(row['fecha']).date()
+            if _has_rain_for_date(ddate):
+                label = label + ' 🌧️'
+            return label
+        except Exception:
+            return row.get('dia_semana', '')
+
+    df_prediccion_display['dia_semana'] = df_prediccion_display.apply(_annotate_row, axis=1)
     # Añadir columna 'Estimación sin Partido' basada en 'pred_before_partidos' si existe
     try:
         if 'pred_before_partidos' in df_prediccion_display.columns:
@@ -4923,3 +5620,9 @@ if not display_results:
         st.warning("No hay datos históricos cargados. Súbelos en la barra lateral.")
     else:
         st.info("Selecciona el lunes de una semana y pulsa 'Calcular' para ver los resultados.")
+
+# Mostrar siempre la tabla histórica de lluvia debajo de la selección (muestra predicción si existe)
+try:
+    mostrar_tabla_historico_lluvia()
+except Exception:
+    pass
