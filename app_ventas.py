@@ -180,6 +180,8 @@ st.markdown("""
         padding-right: 1rem;
         padding-left: 1rem;
     }
+    .st-emotion-cache-1cmetgi{ width:auto; flex:none}
+    .st-emotion-cache-k4l2xv{ width:auto; flex:none}
     @media (max-width: 768px) {
         .main .block-container { padding-left: 0.5rem; padding-right: 0.5rem; }
         .streamlit-expanderHeader { font-size: 0.9em; padding: 0.5rem; }
@@ -299,6 +301,31 @@ def _normalize_text_for_compare(s):
             return str(s).strip().lower()
         except Exception:
             return ''
+
+
+def _match_time_in_ignore_window(match_obj, start_time='11:00', end_time='18:30'):
+    """Return True if the match (string or dict) has a time between start_time and end_time inclusive.
+    If no time found, return False (i.e., not in ignore window).
+    """
+    try:
+        time_str = None
+        if match_obj is None:
+            return False
+        if isinstance(match_obj, dict):
+            # common key used elsewhere: 'hora' or 'time'
+            time_str = match_obj.get('hora') or match_obj.get('time')
+        elif isinstance(match_obj, str):
+            m = re.search(r"(\d{1,2}:\d{2})", match_obj)
+            if m:
+                time_str = m.group(1)
+        if not time_str:
+            return False
+        t = datetime.strptime(time_str.strip(), '%H:%M').time()
+        t_start = datetime.strptime(start_time, '%H:%M').time()
+        t_end = datetime.strptime(end_time, '%H:%M').time()
+        return (t_start <= t <= t_end)
+    except Exception:
+        return False
 
 # Límites base de coste de personal (% de ventas estimadas)
 LIMITES_COSTE_BASE = {
@@ -1787,14 +1814,20 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 if fecha_base_dt is not None and fecha_base_dt in df_base.index:
                     fecha_base_key = fecha_base_dt.strftime('%Y-%m-%d')
                     # FCB base effect
-                    if fecha_base_key in fcb_matches:
+                    match_obj_base = fcb_matches.get(fecha_base_key)
+                    if match_obj_base and (not _match_time_in_ignore_window(match_obj_base)):
                         ventas_partido = float(df_base.loc[fecha_base_dt, 'ventas'])
                         occ_same_wd = df_base[df_base.index.weekday == fecha_base_dt.weekday()].sort_index()
                         occ_prev_same = occ_same_wd[occ_same_wd.index < fecha_base_dt]
                         occ_prev_filtered = []
                         for d in reversed(list(occ_prev_same.index)):
                             d_str = d.strftime('%Y-%m-%d')
-                            if d_str in fcb_matches:
+                            # Excluir días con partido FCB únicamente si el partido NO
+                            # está en la ventana ignorada; si el partido existió pero
+                            # su hora cae en la ventana 11:00-18:30 lo tratamos como
+                            # día normal (NO lo excluimos).
+                            mobj = fcb_matches.get(d_str)
+                            if mobj and (not _match_time_in_ignore_window(mobj)):
                                 continue
                             if es_festivo(d) or es_vispera_de_festivo(d):
                                 continue
@@ -1806,14 +1839,16 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                             fcb_prev_vals = list(reversed(occ_prev_filtered))
                             fcb_pct_base = (ventas_partido - mean_prev) / mean_prev
                     # RM base effect
-                    if fecha_base_key in rm_matches:
+                    match_obj_base_rm = rm_matches.get(fecha_base_key)
+                    if match_obj_base_rm and (not _match_time_in_ignore_window(match_obj_base_rm)):
                         ventas_partido_rm = float(df_base.loc[fecha_base_dt, 'ventas'])
                         occ_same_wd_rm = df_base[df_base.index.weekday == fecha_base_dt.weekday()].sort_index()
                         occ_prev_same_rm = occ_same_wd_rm[occ_same_wd_rm.index < fecha_base_dt]
                         occ_prev_filtered_rm = []
                         for d in reversed(list(occ_prev_same_rm.index)):
                             d_str = d.strftime('%Y-%m-%d')
-                            if d_str in rm_matches:
+                            mobj_rm = rm_matches.get(d_str)
+                            if mobj_rm and (not _match_time_in_ignore_window(mobj_rm)):
                                 continue
                             if es_festivo(d) or es_vispera_de_festivo(d):
                                 continue
@@ -2465,6 +2500,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 fcb_dict = st.session_state.get('fcb_matches', {})
                 pcts = []
                 for d_str, match_obj in (fcb_dict or {}).items():
+                    # Ignorar partidos históricas cuya hora esté dentro de la ventana 11:00-18:30
+                    if _match_time_in_ignore_window(match_obj):
+                        continue
                     try:
                         opp_hist_norm = _extract_and_clean(match_obj)
                     except Exception:
@@ -2519,53 +2557,25 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 pred_before_partidos = None
             fcb_matches = st.session_state.get('fcb_matches', {})
             apply_fcb = False
-            if fecha_str in fcb_matches:
+            match_today_obj_local = fcb_matches.get(fecha_str)
+            # Solo aplicar ajuste FCB si existe un partido y su hora NO está en la ventana 11:00-18:30
+            if match_today_obj_local and (not _match_time_in_ignore_window(match_today_obj_local)):
                 apply_fcb = True
             elif fecha_str in eventos:
                 ev = eventos.get(fecha_str, {})
                 desc = ev.get('descripcion', '') if isinstance(ev, dict) else str(ev)
                 if 'FCB' in desc.upper():
                     apply_fcb = True
-            # Preferir usar exclusivamente la 'Media FCB VS' (media histórica frente a ese rival)
-            # `media_fcb_vs` está en porcentaje (e.g. -8.3), convertir a ratio dividiendo entre 100.
-            # NO usar `fcb_pct_base` como fallback para el cálculo; mantenerlo solo para display/auditoría.
             fcb_source_used = None
             try:
                 if apply_fcb:
                     if media_fcb_vs is not None:
                         impacto_fcb = 1.0 + (float(media_fcb_vs) / 100.0)
                         fcb_source_used = 'media_fcb_vs'
-                        # Si el partido de hoy tiene hora entre 16:00 y 18:30, atenuar
-                        # el impacto en un 90% (tanto si es positivo como negativo).
-                        try:
-                            hora_val = None
-                            if isinstance(fcb_match_today, dict):
-                                hora_val = fcb_match_today.get('hora')
-                            elif isinstance(fcb_match_today, str):
-                                m = re.search(r"(\d{1,2}:\d{2})", fcb_match_today)
-                                hora_val = m.group(1) if m else None
-                            if hora_val:
-                                try:
-                                    t = datetime.strptime(hora_val.strip(), '%H:%M').time()
-                                    t_min = datetime.strptime('16:00', '%H:%M').time()
-                                    t_max = datetime.strptime('18:30', '%H:%M').time()
-                                    if t_min <= t <= t_max:
-                                        impacto_fcb = 1.0 + (impacto_fcb - 1.0) * 0.05
-                                        fcb_source_used = (fcb_source_used or '') + ' (hora_atenuada)'
-                                        try:
-                                            tipo_evento = (tipo_evento or '') + ' + Partido(hora atenuada)'
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
                     else:
-                        # Si no hay media histórica por rival, no aplicamos ajuste FCB
                         impacto_fcb = 1.0
                         fcb_source_used = None
 
-                    # Registrar la predicción previa al ajuste FCB para auditoría
                     try:
                         pred_before_fcb = float(prediccion_final)
                     except Exception:
@@ -2656,6 +2666,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             if opponent_norm_rm:
                 pcts_rm = []
                 for d_str, match_obj in (rm_dict or {}).items():
+                    # Ignorar partidos históricas cuya hora esté dentro de la ventana 11:00-18:30
+                    if _match_time_in_ignore_window(match_obj):
+                        continue
                     try:
                         opp_hist_norm = _extract_and_clean_rm(match_obj)
                     except Exception:
@@ -2703,7 +2716,9 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         try:
             rm_dict = st.session_state.get('rm_matches', {})
             apply_rm = False
-            if fecha_str in rm_dict:
+            match_today_obj_rm = rm_dict.get(fecha_str)
+            # Solo aplicar ajuste RM si existe un partido y su hora NO está en la ventana 11:00-18:30
+            if match_today_obj_rm and (not _match_time_in_ignore_window(match_today_obj_rm)):
                 apply_rm = True
             elif fecha_str in eventos:
                 ev = eventos.get(fecha_str, {})
@@ -2712,7 +2727,6 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     apply_rm = True
             try:
                 if apply_rm:
-                    # Registrar predicción previa al ajuste RM (audit) por cada día
                     try:
                         pred_before_rm = float(prediccion_final)
                     except Exception:
@@ -2721,33 +2735,6 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     if media_rm_vs is not None:
                         impacto_rm = 1.0 + (float(media_rm_vs) / 100.0)
                         rm_source_used = 'media_rm_vs'
-                        # Atenuar impacto RM en 90% si el partido de hoy empieza entre 16:00 y 18:30
-                        try:
-                            hora_val_rm = None
-                            if isinstance(rm_match_today, dict):
-                                hora_val_rm = rm_match_today.get('hora')
-                            elif isinstance(rm_match_today, str):
-                                m2 = re.search(r"(\d{1,2}:\d{2})", rm_match_today)
-                                hora_val_rm = m2.group(1) if m2 else None
-                            if hora_val_rm:
-                                try:
-                                    t_rm = datetime.strptime(hora_val_rm.strip(), '%H:%M').time()
-                                    t_min = datetime.strptime('16:00', '%H:%M').time()
-                                    t_max = datetime.strptime('18:30', '%H:%M').time()
-                                    if t_min <= t_rm <= t_max:
-                                        impacto_rm = 1.0 + (impacto_rm - 1.0) * 0.05
-                                        rm_source_used = (rm_source_used or '') + ' (hora_atenuada)'
-                                        try:
-                                            if 'RM' in (tipo_evento or '').upper():
-                                                tipo_evento = (tipo_evento or '') + ' + Partido(hora atenuada)'
-                                            else:
-                                                tipo_evento = (tipo_evento or '') + ' + RM(hora atenuada)'
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
                     else:
                         impacto_rm = 1.0
                         rm_source_used = None
@@ -3598,12 +3585,13 @@ def mostrar_indicador_crecimiento():
                     text-align: center;
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
                     display:inline-block;
-                    min-width:150px;
+                    min-width:159px;
                     box-shadow: 0 10px 30px rgba(7,12,20,0.06);
                 }}
                 .ytd-card .pct {{ font-size:1.5rem; font-weight:800; margin-bottom:6px; color: {text_color}; }}
                 .ytd-card .delta {{ font-size:1.05rem; font-weight:800; color: {text_color}; padding:8px 12px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center; gap:8px; min-width:120px; }}
                 .ytd-card .arrow-text {{ font-size:1.05rem; line-height:1; color: {text_color}; }}
+                .st-emotion-cache-uddcx6 {{ flex:none; width:auto; }} 
                 @media (max-width:600px) {{
                     .ytd-card {{ min-width:120px; padding:8px 10px; }}
                     .ytd-card .pct {{ font-size:1.2rem; }}
@@ -3732,42 +3720,6 @@ if st.session_state.get('autenticado', False):
 st.sidebar.title("📈 Optimización de Ventas")
 st.sidebar.markdown("Herramienta para predecir ventas y optimizar costes de personal.")
 
-# Debug: mostrar métricas de impacto de lluvia
-with st.sidebar.expander("Debug lluvia (interno)", expanded=False):
-    try:
-        st.write('rain_impact_overall_pct', st.session_state.get('rain_impact_overall_pct'))
-        st.write('rain_impact_by_weekday', st.session_state.get('rain_impact_by_weekday'))
-        if st.button('Listar difs usadas (días con lluvia vs pred)', key='btn_show_rain_difs'):
-            try:
-                df = st.session_state.get('df_historico', pd.DataFrame())
-                df_pred = st.session_state.get('df_prediccion', pd.DataFrame())
-                pred_map = {}
-                if isinstance(df_pred, pd.DataFrame) and not df_pred.empty:
-                    for idx, row in df_pred.iterrows():
-                        try:
-                            pred_map[pd.to_datetime(idx).date()] = float(row.get('ventas_predichas', np.nan))
-                        except Exception:
-                            continue
-                difs = []
-                if not df.empty:
-                    for idx, row in df.iterrows():
-                        try:
-                            if float(row.get('precip_mm', 0.0)) > 2.5:
-                                d = idx.date()
-                                if d in pred_map and pred_map[d] not in (None, np.nan) and pred_map[d] != 0:
-                                    v = row.get('ventas', np.nan)
-                                    p = pred_map[d]
-                                    if pd.notna(v):
-                                        difs.append((float(v) - float(p)) / float(p))
-                        except Exception:
-                            continue
-                st.write('difs_count', len(difs))
-                st.write(difs)
-            except Exception as e:
-                st.write('error', str(e))
-    except Exception:
-        pass
-
 st.sidebar.header("1. Cargar Datos Históricos de Ventas")
 st.sidebar.markdown("Sube tus archivos CSV o Excel (columnas: 'fecha', 'ventas') para *todos* los años. Los datos se fusionarán en un histórico único.")
 
@@ -3779,32 +3731,6 @@ if uploader_historico:
         st.session_state.df_historico = st.session_state.df_historico[~st.session_state.df_historico.index.duplicated(keep='last')].sort_index()
         guardar_datos('ventas')
         st.sidebar.success("Datos históricos cargados y guardados.")
-
-    # Botón para descargar/enriquecer histórico con precipitación usando Open-Meteo
-    if st.sidebar.button("Enriquecer histórico con datos de lluvia (Open-Meteo)"):
-        try:
-            df_hist = st.session_state.get('df_historico', pd.DataFrame())
-            if df_hist is None or df_hist.empty:
-                st.sidebar.error("No hay datos históricos cargados. Primero sube un archivo de ventas.")
-            else:
-                start = df_hist.index.min().date()
-                end = df_hist.index.max().date() + timedelta(days=14)  # incluir pronóstico 2 semanas
-                LAT, LON = 41.1189, 1.2445  # Tarragona
-                # `st.sidebar` does not expose `spinner()`; use top-level `st.spinner`
-                with st.spinner('Descargando datos de lluvia (histórico + 2 semanas)...'):
-                    precip_map = fetch_precipitation_open_meteo(LAT, LON, start, end)
-                if not precip_map:
-                    diag = st.session_state.get('diag_precip_error', None)
-                    if diag:
-                        st.sidebar.error(f'No se pudieron obtener datos de lluvia ({diag}).')
-                    else:
-                        st.sidebar.error('No se pudieron obtener datos de lluvia. Revisa la conexión o inténtalo más tarde.')
-                else:
-                    st.session_state['precip_map'] = precip_map
-                    enrich_historico_with_precip()
-                    st.sidebar.success('Histórico enriquecido y pronóstico guardado en sesión.')
-        except Exception as e:
-            st.sidebar.error(f"Error al enriquecer histórico con lluvia: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("##### Añadir / Editar Venta Manual")
@@ -3834,6 +3760,285 @@ with st.sidebar.expander("Ver / Editar Datos Históricos (Guardado automático)"
 st.sidebar.header("2. Calendario de Eventos Anómalos")
 st.sidebar.markdown("Añade días especiales para visualizarlos en el gráfico.")
 
+# TheSportsDB integration removed: only football-data.org client retained
+
+# --- Integración opcional con football-data.org (requiere API token) ---
+def _fd_get_headers(token):
+    return {
+        'X-Auth-Token': token,
+        'Accept': 'application/json'
+    }
+
+def find_team_id_fd(team_name, token):
+    """Intentar localizar el team id en LaLiga (competición PD) por nombre/shortName/tla.
+    Devuelve el id numérico o None.
+    """
+    try:
+        # Priorizar overrides conocidos para evitar coincidencias ambiguas
+        TEAM_ID_OVERRIDES_LOCAL = {
+            'fc barcelona': 81,
+            'fcbarcelona': 81,
+            'barcelona': 81,
+            'barça': 81,
+            'real madrid': 86,
+            'realmadrid': 86,
+            'real madrid cf': 86,
+        }
+        tn_key = _normalize_text_for_compare(team_name or '')
+        if tn_key in TEAM_ID_OVERRIDES_LOCAL:
+            return TEAM_ID_OVERRIDES_LOCAL.get(tn_key)
+        headers = _fd_get_headers(token)
+        url_v2 = 'https://api.football-data.org/v2/competitions/PD/teams'
+        url_v4 = 'https://api.football-data.org/v4/competitions/PD/teams'
+        r = requests.get(url_v2, headers=headers, timeout=10)
+        # si token no es válido para v2 (403 con mensaje de migración), reintentar en v4
+        if r.status_code == 403 and 'v4' in (r.text or ''):
+            try:
+                r = requests.get(url_v4, headers=headers, timeout=10)
+            except Exception:
+                pass
+        # guardar diagnóstico bruto para ayudar a depurar permisos/errores
+        try:
+            st.session_state['fd_teams_raw'] = {'status': r.status_code, 'text': r.text, 'url_used': r.url}
+        except Exception:
+            pass
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        teams = j.get('teams') or []
+        tn = str(team_name).strip().lower()
+        # función de normalización básica
+        def _norm(s):
+            if not s:
+                return ''
+            s2 = str(s).lower()
+            s2 = unicodedata.normalize('NFKD', s2)
+            s2 = ''.join(c for c in s2 if not unicodedata.combining(c))
+            for p in ['fc ', 'f.c. ', 'cf ', 'c.f. ', 'club ', ' club', "'", '"', '.', ',']:
+                s2 = s2.replace(p, '')
+            s2 = s2.strip()
+            return s2
+
+        tn_norm = _norm(tn)
+        for t in teams:
+            for key in ('name', 'shortName', 'tla'):
+                val = t.get(key)
+                val_norm = _norm(val)
+                if val and (tn in str(val).strip().lower() or tn_norm == val_norm or tn_norm in val_norm or val_norm in tn_norm):
+                    return t.get('id')
+        # fallback: try exact match on name
+        for t in teams:
+            if _norm(t.get('name', '')) == tn_norm:
+                return t.get('id')
+        # dejar lista de nombres para diagnóstico
+        try:
+            st.session_state['fd_teams_list'] = [t.get('name') for t in teams]
+        except Exception:
+            pass
+    except Exception:
+        return None
+    return None
+
+def import_matches_from_football_data(team_name, save_key, token, start_date=None, end_date=None):
+    """Importa partidos desde football-data.org y los mapea al formato simple.
+    `token` es obligatorio (puede obtenerse en https://www.football-data.org/).
+    Filtra por `start_date` (por defecto 2024-01-01) y `end_date` (por defecto +1 año desde hoy).
+    """
+    try:
+        if not token:
+            st.sidebar.error('Necesitas proporcionar tu API token de football-data.org en el campo correspondiente.')
+            return
+        try:
+            cutoff = pd.to_datetime(start_date).date() if start_date is not None else pd.to_datetime('2024-01-01').date()
+        except Exception:
+            cutoff = pd.to_datetime('2024-01-01').date()
+        try:
+            if end_date is None:
+                end_dt = (datetime.now().date() + timedelta(days=365))
+            else:
+                end_dt = pd.to_datetime(end_date).date()
+        except Exception:
+            end_dt = (datetime.now().date() + timedelta(days=365))
+
+        team_id = find_team_id_fd(team_name, token)
+        # overrides conocidos para evitar dependencias de búsqueda
+        TEAM_ID_OVERRIDES = {
+            'FC Barcelona': 81,
+            'Real Madrid': 86,
+            'Real Madrid CF': 86,
+            'Barça': 81
+        }
+        if not team_id:
+            team_id = TEAM_ID_OVERRIDES.get(team_name)
+        if not team_id:
+            st.sidebar.error(f'No se encontró el equipo {team_name} en football-data.org (buscando en LaLiga).')
+            return
+
+        # construir URL para matches, preferir v2 pero reintentar con v4 si necesario
+        url_v2_matches = f'https://api.football-data.org/v2/teams/{team_id}/matches?dateFrom={cutoff}&dateTo={end_dt}'
+        url_v4_matches = f'https://api.football-data.org/v4/teams/{team_id}/matches?dateFrom={cutoff}&dateTo={end_dt}'
+        url = url_v2_matches
+        headers = _fd_get_headers(token)
+        r = requests.get(url, headers=headers, timeout=15)
+        # si token no es válido para v2 (403 con mensaje de migración), reintentar en v4
+        if r.status_code == 403 and 'v4' in (r.text or ''):
+            try:
+                r = requests.get(url_v4_matches, headers=headers, timeout=15)
+            except Exception:
+                pass
+
+        # manejar 400 (bad request) con intentos alternativos y guardar diagnostico
+        if r.status_code == 400:
+            try:
+                st.session_state['fd_last_raw'] = {'status': r.status_code, 'text': r.text, 'url': r.url}
+            except Exception:
+                pass
+            # reintentar en v4 sin filtros
+            try:
+                r = requests.get(f'https://api.football-data.org/v4/teams/{team_id}/matches', headers=headers, timeout=15)
+                if r.status_code == 200:
+                    pass
+                else:
+                    # intentar con season extraída del teams raw si existe
+                    season = None
+                    try:
+                        tr = st.session_state.get('fd_teams_raw') or {}
+                        text = tr.get('text') if isinstance(tr, dict) else None
+                        if text and '"season"' in str(text):
+                            # buscar un valor numérico de season en el texto (poco sofisticado)
+                            import re as _re
+                            m = _re.search(r'"season"\s*:\s*"?(\d{4})"?', str(text))
+                            if m:
+                                season = m.group(1)
+                    except Exception:
+                        season = None
+                    if season:
+                        try:
+                            r = requests.get(f'https://api.football-data.org/v4/teams/{team_id}/matches?season={season}', headers=headers, timeout=15)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if r.status_code != 200:
+            st.sidebar.error(f'Error al consultar football-data.org: status {r.status_code}')
+            try:
+                st.session_state['fd_last_raw'] = {'status': r.status_code, 'text': r.text if hasattr(r, 'text') else str(r), 'url': getattr(r, 'url', url)}
+            except Exception:
+                pass
+            return
+        j = r.json()
+        matches = j.get('matches') or []
+        if not matches:
+            st.sidebar.info(f'No se encontraron partidos para {team_name} en el rango solicitado.')
+            try:
+                st.session_state['fd_last_raw'] = j
+            except Exception:
+                pass
+            return
+
+        # Mapear matches a formato simple {YYYY-MM-DD: 'Home vs Away (HH:MM)'}
+        mapped = {}
+        for m in matches:
+            try:
+                # Fecha/hora en v4 suele venir en 'utcDate'
+                date_iso = m.get('utcDate') or m.get('date') or m.get('matchday')
+                if not date_iso:
+                    continue
+                try:
+                    if isinstance(date_iso, str) and date_iso.endswith('Z'):
+                        dt = datetime.fromisoformat(date_iso.replace('Z', '+00:00'))
+                    else:
+                        dt = datetime.fromisoformat(str(date_iso))
+                    try:
+                        local_dt = dt.astimezone()
+                    except Exception:
+                        local_dt = dt
+                except Exception:
+                    continue
+
+                fecha_key = local_dt.strftime('%Y-%m-%d')
+                hora = local_dt.strftime('%H:%M')
+
+                home = (m.get('homeTeam') or {}).get('name') or m.get('homeTeamName') or m.get('homeTeam', '')
+                away = (m.get('awayTeam') or {}).get('name') or m.get('awayTeamName') or m.get('awayTeam', '')
+                home = home if isinstance(home, str) else str(home)
+                away = away if isinstance(away, str) else str(away)
+
+                # Para partidos futuros requerimos hora válida (no 00:00)
+                try:
+                    is_future = local_dt.date() >= datetime.now().date()
+                except Exception:
+                    is_future = False
+                if is_future and hora in ('00:00', '0:00'):
+                    continue
+
+                desc = f"{home} vs {away} ({hora})" if hora else f"{home} vs {away}"
+                mapped[fecha_key] = desc
+            except Exception:
+                continue
+
+        # Guardar en session_state y persistir
+        if save_key == 'partidos':
+            st.session_state.fcb_matches = mapped
+            guardar_datos('partidos')
+        else:
+            st.session_state.rm_matches = mapped
+            guardar_datos('partidos_rm')
+        st.sidebar.success(f'Importados {len(mapped)} partidos para {team_name} (football-data.org).')
+        try:
+            st.session_state['fd_last_raw'] = j
+        except Exception:
+            pass
+            return
+
+        mapped = {}
+        for m in matches:
+            try:
+                utc = m.get('utcDate') or m.get('date')
+                if not utc:
+                    continue
+                fecha = pd.to_datetime(utc, utc=True, errors='coerce')
+                if pd.isna(fecha):
+                    continue
+                fecha_local = fecha.tz_convert('Europe/Madrid') if fecha.tzinfo is not None else fecha.tz_localize('UTC').tz_convert('Europe/Madrid')
+                fecha_key = fecha_local.date().strftime('%Y-%m-%d')
+                if fecha_local.date() < cutoff:
+                    continue
+                # Requerir que la hora esté establecida (no 00:00)
+                t = fecha_local.time()
+                if t.hour == 0 and t.minute == 0 and t.second == 0:
+                    # si es pasado (match ya jugado) lo incluimos, si es futuro y no tiene hora, lo ignoramos
+                    # comprobar si fecha_local < now
+                    if fecha_local.date() >= datetime.now().date():
+                        continue
+                home = m.get('homeTeam', {}).get('name') or ''
+                away = m.get('awayTeam', {}).get('name') or ''
+                # hora en HH:MM
+                hora = fecha_local.strftime('%H:%M')
+                desc = f"{home} vs {away} ({hora})" if hora else f"{home} vs {away}"
+                mapped[fecha_key] = desc
+            except Exception:
+                continue
+
+        if save_key == 'partidos':
+            st.session_state.fcb_matches = mapped
+            guardar_datos('partidos')
+        else:
+            st.session_state.rm_matches = mapped
+            guardar_datos('partidos_rm')
+        st.sidebar.success(f'Importados {len(mapped)} partidos para {team_name} (football-data.org).')
+        try:
+            st.session_state['fd_last_raw'] = j
+        except Exception:
+            pass
+    except Exception as e:
+        st.sidebar.error(f'Error importando desde football-data.org: {e}')
+
+
+# TheSportsDB importer removed — use `import_matches_from_football_data` instead.
+
+
 uploader_eventos = st.sidebar.file_uploader("Importar Eventos Históricos (CSV/Excel)", type=['csv', 'xlsx'], help="El archivo debe tener las columnas: 'Fecha', 'Venta', y 'Nombre del evento'.")
 if uploader_eventos:
     nuevos_eventos = procesar_archivo_eventos(uploader_eventos)
@@ -3843,29 +4048,56 @@ if uploader_eventos:
         st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_eventos)} eventos.")
 
 # Uploader específico para partidos del FCB
-uploader_partidos = st.sidebar.file_uploader("Importar Partidos FCB (CSV/Excel)", type=['csv', 'xlsx'], help="Archivo con columnas 'Fecha' y 'Partido' (fecha puede incluir hora).")
-if uploader_partidos:
-    nuevos_partidos = procesar_archivo_partidos(uploader_partidos)
-    if nuevos_partidos:
-        # almacenar en session_state como dict fecha->descripcion
-        prev = st.session_state.get('fcb_matches', {})
-        prev.update(nuevos_partidos)
-        st.session_state.fcb_matches = prev
-        guardar_datos('partidos')
-        st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_partidos)} partidos FCB.")
-        # No forzamos rerun para evitar recálculos pesados al subir archivos pequeños
+# TheSportsDB import buttons removed.
 
-# Uploader para Partidos RM (Real Madrid)
-uploader_partidos_rm = st.sidebar.file_uploader("Importar Partidos RM (CSV/Excel)", type=['csv', 'xlsx'], help="Archivo con columnas 'Fecha' y 'Partido' (fecha puede incluir hora).", key='uploader_partidos_rm')
-if uploader_partidos_rm:
-    nuevos_partidos_rm = procesar_archivo_partidos(uploader_partidos_rm)
-    if nuevos_partidos_rm:
-        prev_rm = st.session_state.get('rm_matches', {})
-        prev_rm.update(nuevos_partidos_rm)
-        st.session_state.rm_matches = prev_rm
+# Los uploaders de partidos FCB/RM se han eliminado del sidebar: ahora se usa
+# el botón principal junto al cálculo (Importar partidos RM y FCB).
+
+# Botón para normalizar la estructura de partidos a formato simple
+if st.sidebar.button("Normalizar partidos cargados (solo descripción)"):
+    def _normalize_matches_map(mp):
+        out = {}
+        try:
+            for k, v in (mp or {}).items():
+                try:
+                    if isinstance(v, dict):
+                        desc = v.get('partido') or v.get('descripcion') or v.get('match') or ''
+                        hora = v.get('hora')
+                        if hora:
+                            out[k] = f"{desc} ({hora})"
+                        else:
+                            out[k] = desc
+                    else:
+                        out[k] = str(v)
+                except Exception:
+                    out[k] = str(v)
+        except Exception:
+            return {}
+        return out
+
+    fcb_prev = st.session_state.get('fcb_matches', {})
+    rm_prev = st.session_state.get('rm_matches', {})
+    if fcb_prev:
+        st.session_state.fcb_matches = _normalize_matches_map(fcb_prev)
+        guardar_datos('partidos')
+    if rm_prev:
+        st.session_state.rm_matches = _normalize_matches_map(rm_prev)
         guardar_datos('partidos_rm')
-        st.sidebar.success(f"Se importaron/actualizaron {len(nuevos_partidos_rm)} partidos RM.")
-        # No forzamos rerun
+    st.sidebar.success('Partidos normalizados y guardados.')
+
+# --- Football-data.org quick UI: token ---
+# Preferir `st.secrets['FOOTBALL_DATA_TOKEN']` si existe; mantenemos el token por defecto.
+fd_token = None
+try:
+    fd_token = st.secrets.get('FOOTBALL_DATA_TOKEN', None)
+except Exception:
+    fd_token = None
+# Valor por defecto (clave facilitada por el usuario)
+DEFAULT_FD_TOKEN = '0fd0c09fd6b64050ad4590037977a293'
+if not fd_token:
+    fd_token = DEFAULT_FD_TOKEN
+# Nota: los botones y diagnósticos de importación en el sidebar han sido eliminados.
+used_token = fd_token
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("O añade un evento futuro (solo nombre):")
@@ -4337,7 +4569,49 @@ if calculo_disponible and not st.session_state.df_historico.empty and BASE_YEAR 
     st.warning(f"Advertencia: No se encontraron datos para el Año Base **{BASE_YEAR}** en el histórico. La predicción se basará en las medias generales, lo que podría reducir la precisión.")
 calculo_final_disponible = calculo_disponible
 
-if st.button("🚀 Calcular Predicción y Optimización", type="primary", disabled=not calculo_final_disponible):
+# Mostrar botones: calcular (principal), enriquecer histórico (lluvia) y importar partidos al lado
+col_calc, col_enrich, col_fd = st.columns([3, 1, 1])
+if col_enrich.button("🌧️ Importar lluvia", key='btn_enrich_main'):
+    try:
+        df_hist = st.session_state.get('df_historico', pd.DataFrame())
+        if df_hist is None or df_hist.empty:
+            st.error("No hay datos históricos cargados. Primero sube un archivo de ventas.")
+        else:
+            start = df_hist.index.min().date()
+            end = df_hist.index.max().date() + timedelta(days=14)
+            LAT, LON = 41.1189, 1.2445
+            with st.spinner('Descargando datos de lluvia (histórico + 2 semanas)...'):
+                precip_map = fetch_precipitation_open_meteo(LAT, LON, start, end)
+            if not precip_map:
+                diag = st.session_state.get('diag_precip_error', None)
+                if diag:
+                    st.error(f'No se pudieron obtener datos de lluvia ({diag}).')
+                else:
+                    st.error('No se pudieron obtener datos de lluvia. Revisa la conexión o inténtalo más tarde.')
+            else:
+                st.session_state['precip_map'] = precip_map
+                enrich_historico_with_precip()
+                st.success('Histórico enriquecido y pronóstico guardado en sesión.')
+    except Exception as e:
+        st.error(f"Error al enriquecer histórico con lluvia: {e}")
+
+if col_fd.button("⚽Importar partidos RM y FCB", key='btn_import_fd'):
+    try:
+        fd_token = None
+        try:
+            fd_token = st.secrets.get('FOOTBALL_DATA_TOKEN', None)
+        except Exception:
+            fd_token = None
+        if not fd_token:
+            fd_token = DEFAULT_FD_TOKEN
+        with st.spinner('Importando partidos RM y FCB...'):
+            import_matches_from_football_data('FC Barcelona', 'partidos', fd_token)
+            import_matches_from_football_data('Real Madrid', 'partidos_rm', fd_token)
+        st.success('Importación de partidos completada.')
+    except Exception as e:
+        st.error(f"Error al importar partidos: {e}")
+
+if col_calc.button("🚀 Calcular Predicción y Optimización", type="primary", disabled=not calculo_final_disponible):
     if 'df_prediccion' in st.session_state:
         del st.session_state.df_prediccion
     # Ensure precipitation enrichment exists before heavy calculation: try auto-enrich if missing
@@ -4890,6 +5164,65 @@ if display_results:
     # Columna visual pequeña con icono para indicar el caso (se puede ocultar si no se quiere)
     df_prediccion_display['Base Indicador'] = df_prediccion_display['base_historica_flag'].apply(lambda v: '⚠️' if bool(v) else '')
     has_reales = df_prediccion_display['Ventas Reales'].ne(PLACEHOLDER_STR).any()
+
+    # Reemplazar la etiqueta 'evento' por la descripción completa del partido
+    # almacenada en persistencia (si existe) para evitar abreviaciones/normalizaciones
+    try:
+        def _expand_evento_label(row):
+            try:
+                fecha_key = None
+                if hasattr(row.get('fecha'), 'strftime'):
+                    fecha_key = row.get('fecha').strftime('%Y-%m-%d')
+                else:
+                    fecha_key = str(row.get('fecha'))
+                evt = row.get('evento', '')
+                if not evt:
+                    # If no tipo_evento but persisted match exists, still show match
+                    try:
+                        rm_map = st.session_state.get('rm_matches', {}) or {}
+                        fcb_map = st.session_state.get('fcb_matches', {}) or {}
+                        if fecha_key in rm_map:
+                            val = rm_map.get(fecha_key)
+                            if isinstance(val, dict):
+                                part = val.get('partido', '')
+                                hora = val.get('hora')
+                                return f"{val}" if not isinstance(val, dict) else (f"{part} ({hora})" if hora else f"{part}")
+                        if fecha_key in fcb_map:
+                            val = fcb_map.get(fecha_key)
+                            if isinstance(val, dict):
+                                part = val.get('partido', '')
+                                hora = val.get('hora')
+                                return f"{val}" if not isinstance(val, dict) else (f"{part} ({hora})" if hora else f"{part}")
+                    except Exception:
+                        pass
+                    return evt
+                # Preferir la descripción persistida en rm_matches/fcb_matches cuando exista
+                try:
+                    rm_map = st.session_state.get('rm_matches', {}) or {}
+                    fcb_map = st.session_state.get('fcb_matches', {}) or {}
+                    if fecha_key in rm_map:
+                        val = rm_map.get(fecha_key)
+                        if isinstance(val, dict):
+                            part = val.get('partido', '')
+                            hora = val.get('hora')
+                            return f"RM vs {part} ({hora})" if hora else f"RM vs {part}"
+                        return str(val)
+                    if fecha_key in fcb_map:
+                        val = fcb_map.get(fecha_key)
+                        if isinstance(val, dict):
+                            part = val.get('partido', '')
+                            hora = val.get('hora')
+                            return f"FCB vs {part} ({hora})" if hora else f"FCB vs {part}"
+                        return str(val)
+                except Exception:
+                    pass
+                return evt
+            except Exception:
+                return row.get('evento', '')
+
+        df_prediccion_display['evento'] = df_prediccion_display.apply(_expand_evento_label, axis=1)
+    except Exception:
+        pass
     # Nota: no renombramos aquí 'ventas_predichas' a 'Estimación' para evitar confusiones;
     # la columna final se mostrará como 'Estimación Partido' si procede (ya fue renombrada arriba).
     # Opcional: columnas avanzadas que quedan ocultas por defecto (el usuario puede mostrarlas)
@@ -5086,6 +5419,33 @@ if display_results:
     # Centrar texto en todas las celdas para mejorar presentación
     try:
         style = style.set_properties(**{'text-align': 'center'})
+    except Exception:
+        pass
+
+    # Permitir que la columna 'evento' haga wrap y no se trunque
+    try:
+        if 'evento' in display_df.columns:
+            style = style.set_properties(subset=['evento'], **{
+                'text-align': 'left',
+                'white-space': 'normal',
+                'word-break': 'break-word',
+                'overflow-wrap': 'anywhere'
+            })
+            # Añadir reglas CSS globales de tabla para permitir wrapping de celdas
+            try:
+                extra_styles = [
+                    {'selector': 'td', 'props': [('white-space', 'normal !important'), ('word-break', 'break-word !important'), ('max-width', '280px')]},
+                    {'selector': 'th', 'props': [('white-space', 'normal !important')]}
+                ]
+                # combinar con estilos previos (si existen)
+                existing = []
+                try:
+                    existing = style.table_styles if hasattr(style, 'table_styles') else []
+                except Exception:
+                    existing = []
+                style = style.set_table_styles(existing + extra_styles)
+            except Exception:
+                pass
     except Exception:
         pass
 
