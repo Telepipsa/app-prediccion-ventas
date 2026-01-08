@@ -34,6 +34,7 @@ import math  # CAMBIO: para redondeo hacia arriba a múltiplos de 0,25
 import re
 import unicodedata
 import requests
+from bs4 import BeautifulSoup
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -4036,6 +4037,168 @@ def import_matches_from_football_data(team_name, save_key, token, start_date=Non
         st.sidebar.error(f'Error importando desde football-data.org: {e}')
 
 
+def _parse_date_from_text(text):
+    """Intento robusto y sencillo de extraer una fecha y hora de un texto.
+    Devuelve (fecha_iso, hora) o (None, None) si no se encuentra.
+    """
+    try:
+        # ISO date yyyy-mm-dd
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+        if m:
+            fecha = m.group(1)
+        else:
+            # dd/mm/yyyy
+            m2 = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", text)
+            if m2:
+                d = pd.to_datetime(m2.group(1), dayfirst=True, errors='coerce')
+                if pd.isna(d):
+                    fecha = None
+                else:
+                    fecha = d.strftime('%Y-%m-%d')
+            else:
+                fecha = None
+        # hora HH:MM
+        h = None
+        mh = re.search(r"(\d{1,2}:\d{2})", text)
+        if mh:
+            h = mh.group(1)
+        return fecha, h
+    except Exception:
+        return None, None
+
+
+def fetch_laliga_upcoming(club_url, club_name_variants=None):
+    """Scrapea la página de próximos partidos de LaLiga del club y devuelve
+    un dict {YYYY-MM-DD: 'Home vs Away (HH:MM)'}.
+    `club_name_variants` es lista de variantes del nombre del club para detectar posición.
+    """
+    out = {}
+    try:
+        r = requests.get(club_url, timeout=12)
+        if r.status_code != 200:
+            return out
+        html = r.text
+        soup = BeautifulSoup(html, 'lxml')
+
+        # Extraer texto y procesar bloques multi-línea donde LaLiga sitúa fecha/hora/partido/competición
+        text = soup.get_text(separator='\n')
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+        club_variants = [v.lower() for v in (club_name_variants or [])]
+
+        # patrón de fecha común en la página: '15.01.2026' o '15/01/2026' o '15-01-2026'
+        date_re = re.compile(r"(\d{1,2}[\.\-/]\d{1,2}[\.\-/]\d{4})")
+        sep_candidates = [' vs ', ' vs. ', ' - ', ' – ', '—', ' contra ', ' vs', ' VS ']
+
+        i = 0
+        L = len(lines)
+        while i < L:
+            ln = lines[i]
+            mdate = date_re.search(ln)
+            if mdate:
+                # construir bloque con siguientes líneas (hasta 6) para tener hora, equipos y competición
+                block_lines = [ln]
+                for j in range(i+1, min(i+7, L)):
+                    block_lines.append(lines[j])
+                block = ' '.join(block_lines)
+                # extraer fecha en formato ISO
+                try:
+                    date_str = mdate.group(1)
+                    # normalizar separadores a '.' o '/'
+                    if '.' in date_str:
+                        dt = pd.to_datetime(date_str, format='%d.%m.%Y', errors='coerce')
+                    elif '/' in date_str:
+                        dt = pd.to_datetime(date_str, format='%d/%m/%Y', errors='coerce')
+                    else:
+                        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                    if pd.isna(dt):
+                        fecha = None
+                    else:
+                        fecha = dt.strftime('%Y-%m-%d')
+                except Exception:
+                    fecha = None
+
+                if not fecha:
+                    i += 1
+                    continue
+
+                # hora
+                mh = re.search(r"(\d{1,2}:\d{2})", block)
+                hora = mh.group(1) if mh else None
+
+                # competencia (buscar palabras clave)
+                comp = None
+                for kw in ['Copa del Rey', 'Copa', 'LALIGA', 'Champions', 'Europa League', 'Supercopa']:
+                    if kw.lower() in block.lower():
+                        comp = kw
+                        break
+
+                # equipos: buscar 'VS' o 'vs' en el bloque
+                opponent = None
+                for sep in sep_candidates:
+                    if sep.lower() in block.lower():
+                        parts = re.split(re.escape(sep), block, flags=re.IGNORECASE)
+                        if len(parts) >= 2:
+                            left = parts[0].strip(); right = parts[1].strip()
+                            llow = left.lower(); rlow = right.lower()
+                            is_left_club = any(cv in llow for cv in club_variants)
+                            is_right_club = any(cv in rlow for cv in club_variants)
+                            if is_left_club and not is_right_club:
+                                home_raw = left; away_raw = right
+                            elif is_right_club and not is_left_club:
+                                home_raw = right; away_raw = left
+                            else:
+                                home_raw = left; away_raw = right
+
+                            def _clean_team(s):
+                                try:
+                                    ss = s
+                                    ss = re.sub(r"\b(?:dom|lun|mar|mie|mié|jue|vie|sab|sáb)\b", '', ss, flags=re.IGNORECASE)
+                                    ss = re.sub(r"\d{1,2}[\.\-/]\d{1,2}[\.\-/]\d{4}", '', ss)
+                                    ss = re.sub(r"\d{1,2}:\d{2}", '', ss)
+                                    ss = re.sub(r"\bvs\.?\b", '', ss, flags=re.IGNORECASE)
+                                    ss = re.sub(r"[^A-Za-zÀ-ÿ0-9\s\-\.\']", '', ss)
+                                    ss = ss.replace('-', ' ')
+                                    ss = re.sub(r"\b(por determinar|dazn|laliga|copa del rey|copa|ea sports|easports|uefa|champions|europa|supercopa)\b", '', ss, flags=re.IGNORECASE)
+                                    ss = re.sub(r"\s+", ' ', ss).strip()
+                                    return ss
+                                except Exception:
+                                    return s.strip()
+
+                            home = _clean_team(home_raw)
+                            away = _clean_team(away_raw)
+                            desc_main = f"{home} vs {away}" if home or away else f"{home_raw} vs {away_raw}"
+                            if hora:
+                                desc_main = f"{desc_main} ({hora})"
+                            if comp:
+                                desc_main = f"{desc_main} - {comp}"
+                            out[fecha] = desc_main
+                            break
+
+                # avanzar el índice para evitar re-procesar las mismas líneas
+                i += 7
+                continue
+            i += 1
+        return out
+    except Exception:
+        return out
+
+
+def _merge_matches(existing, additions):
+    """Merge two dicts of matches. Do not overwrite existing dates; prefer existing.
+    Return merged dict.
+    """
+    if not isinstance(existing, dict):
+        existing = {}
+    if not isinstance(additions, dict):
+        additions = {}
+    merged = dict(existing)
+    for k, v in additions.items():
+        if k not in merged or not merged.get(k):
+            merged[k] = v
+    return merged
+
+
 # TheSportsDB importer removed — use `import_matches_from_football_data` instead.
 
 
@@ -4605,8 +4768,23 @@ if col_fd.button("⚽Importar partidos RM y FCB", key='btn_import_fd'):
         if not fd_token:
             fd_token = DEFAULT_FD_TOKEN
         with st.spinner('Importando partidos RM y FCB...'):
-            import_matches_from_football_data('FC Barcelona', 'partidos', fd_token)
-            import_matches_from_football_data('Real Madrid', 'partidos_rm', fd_token)
+                import_matches_from_football_data('FC Barcelona', 'partidos', fd_token)
+                import_matches_from_football_data('Real Madrid', 'partidos_rm', fd_token)
+                # Además, intentar obtener próximos partidos desde la web oficial de LaLiga
+                try:
+                    fcb_url = 'https://www.laliga.com/clubes/fc-barcelona/proximos-partidos'
+                    rm_url = 'https://www.laliga.com/clubes/real-madrid/proximos-partidos'
+                    fcb_add = fetch_laliga_upcoming(fcb_url, ['fc barcelona', 'barcelona', 'barça', 'barca'])
+                    rm_add = fetch_laliga_upcoming(rm_url, ['real madrid', 'madrid'])
+                    # merge sin sobrescribir datos existentes
+                    st.session_state.fcb_matches = _merge_matches(st.session_state.get('fcb_matches', {}), fcb_add)
+                    st.session_state.rm_matches = _merge_matches(st.session_state.get('rm_matches', {}), rm_add)
+                    guardar_datos('partidos')
+                    guardar_datos('partidos_rm')
+                    if fcb_add or rm_add:
+                        st.sidebar.info('Se han añadido partidos desde LaLiga (scrape).')
+                except Exception:
+                    pass
         st.success('Importación de partidos completada.')
     except Exception as e:
         st.error(f"Error al importar partidos: {e}")

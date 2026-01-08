@@ -1,0 +1,5 @@
+{
+  "status": 400,
+  "url": "https://api.football-data.org/v4/teams/81/matches?dateFrom=2024-01-01&dateTo=2026-12-31",
+  "text": "{\"message\":\"Specified period must not exceed 750 days.\",\"errorCode\":400}"
+}

@@ -5,3 +5,5 @@ pulp
 holidays
 openpyxl
 numpy
+beautifulsoup4
+lxml
