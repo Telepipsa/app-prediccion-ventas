@@ -253,6 +253,67 @@ def format_date_with_day(date_obj):
     day_name = DIAS_SEMANA[day_num]
     return f"{day} de {month} de {year} ({day_name})"
 
+
+def _normalize_partidos_data(raw):
+    """
+    Normaliza estructuras de partidos cargadas desde JSON o APIs.
+    Acepta diccionarios con claves de fecha o valores como string/objeto
+    y devuelve un dict con clave 'YYYY-MM-DD' -> {'partido': str, 'hora': 'HH:MM'|None}.
+    """
+    normalized = {}
+    if not raw:
+        return []
+    for k, v in (raw or {}).items():
+        try:
+            # Intentar parsear la clave como fecha
+            dt = pd.to_datetime(k, errors='coerce')
+            if pd.isna(dt):
+                dt = pd.to_datetime(k, errors='coerce', dayfirst=True)
+            if pd.isna(dt):
+                # intentar extraer fecha desde el valor si está embebida
+                s = str(v or '')
+                m = re.search(r"(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})", s)
+                if m:
+                    dt = pd.to_datetime(m.group(1), errors='coerce', dayfirst=True)
+            if pd.isna(dt):
+                # Si no se puede determinar fecha, ignorar entrada
+                continue
+            key = dt.strftime('%Y-%m-%d')
+
+            # Normalizar valor
+            partido = ''
+            hora = None
+            if isinstance(v, dict):
+                partido = str(v.get('partido') or v.get('descripcion') or '')
+                hora = v.get('hora') or None
+            else:
+                txt = str(v or '')
+                # extraer hora si existe
+                m2 = re.search(r"(\d{1,2}:\d{2})", txt)
+                if m2:
+                    hora = m2.group(1)
+                # quitar prefijos de día/fecha como 'SÁB 17.01.2026'
+                txt = re.sub(r"^[A-ZÁÉÍÓÚÑ]{2,6}\s*\d{1,2}[\.\/-]\d{1,2}[\.\/-]\d{2,4}\s*", "", txt, flags=re.I)
+                # quitar sufijos de hora y paréntesis con hora
+                txt = re.sub(r"\s*-?\s*\(?\d{1,2}:\d{2}\)?\s*$", "", txt)
+                # eliminar tokens de competición al final
+                txt = re.sub(r"\s*\(?\b(?:LALIGA|LA LIGA|LIGA|CHAMPIONS|COPA|COPA DEL REY|SUPERCO|SUPER COPA|SUPER|FASE|FASE LIGA)\b\)?\s*$", "", txt, flags=re.I)
+                partido = txt.strip()
+
+            normalized[key] = {'partido': partido, 'hora': hora}
+        except Exception:
+            continue
+    # Convertir dict a lista ordenada por fecha para compatibilidad con nuevas rutinas
+    try:
+        items = []
+        for k in sorted(normalized.keys()):
+            rec = {'fecha': k}
+            rec.update(normalized[k])
+            items.append(rec)
+        return items
+    except Exception:
+        return []
+
 def week_of_month_custom(fecha_or_day):
     """
     Mapea un día del mes a una semana personalizada:
@@ -291,11 +352,48 @@ def _normalize_text_for_compare(s):
             return ''
         s = str(s)
         # corregir caracteres de reemplazo que aparecen por problemas de encoding
-        # reemplazamos por 'e' (más seguro para nombres como 'Atlético')
         s = s.replace('�', 'e')
+        # quitar contenido entre paréntesis (p. ej. '(Champions)', '(19:30)')
+        s = re.sub(r"\(.*?\)", ' ', s)
+        # normalizar acentos/diacríticos
         s = unicodedata.normalize('NFKD', s)
         s = ''.join([c for c in s if not unicodedata.combining(c)])
-        s = re.sub(r'[^0-9A-Za-z\s]', '', s)
+        # sustituir puntuación por espacios
+        s = re.sub(r'[^0-9A-Za-z\s]', ' ', s)
+        # eliminar sufijos/prefijos comunes de clubes que no aportan al match
+        # (fc, cf, rcd, ud, cd, sk, as, ac, sc, bsc, etc.)
+        s = re.sub(r"\b(?:fc|cf|rcd|ud|cd|sk|as|ac|sc|bsc)\b", ' ', s, flags=re.I)
+        # colapsar múltiples espacios y limpiar
+        s = re.sub(r"\s+", ' ', s)
+
+        # --- Mapeo manual de variantes de nombres de rivales ---
+        # Añadir aquí entradas observadas en los datos que generan NaNs
+        # Las claves deben estar en formato similar al resultado de la normalización
+        try:
+            variants_map = {
+                'as monaco': 'monaco',
+                'as monaco fc': 'monaco',
+                'monaco fc': 'monaco',
+                'monaco': 'monaco',
+                'sk slavia praha': 'slavia praha',
+                'slavia praha': 'slavia praha',
+                'fc barcelona': 'barcelona',
+                'barcelona fc': 'barcelona',
+                'barcelona': 'barcelona',
+                'real madrid cf': 'real madrid',
+                'real madrid': 'real madrid',
+                'villarreal cf': 'villarreal',
+                'villarreal': 'villarreal',
+                'real oviedo': 'real oviedo',
+                # event/label noise seen in dataset
+                'dia normal': '',
+                'dia normal partido': ''
+            }
+            for k, v in variants_map.items():
+                s = re.sub(r'\\b' + re.escape(k) + r'\\b', v, s, flags=re.I)
+        except Exception:
+            pass
+
         return s.strip().lower()
     except Exception:
         try:
@@ -304,7 +402,7 @@ def _normalize_text_for_compare(s):
             return ''
 
 
-def _match_time_in_ignore_window(match_obj, start_time='11:00', end_time='18:30'):
+def _match_time_in_ignore_window(match_obj, start_time='12:00', end_time='18:00'):
     """Return True if the match (string or dict) has a time between start_time and end_time inclusive.
     If no time found, return False (i.e., not in ignore window).
     """
@@ -363,30 +461,47 @@ def get_daily_limits(ventas_dia, dia_semana_num):
     """
     if ventas_dia < 1200:
         base = LIMITES_COSTE_BASE[dia_semana_num]
-        total_max_pct = base['total']; aux_max_pct = base['aux']; rep_max_pct = base['rep']
+        total_max_pct = base['total']
+        aux_max_pct = base['aux']
+        rep_max_pct = base['rep']
         total_min_pct = FACTOR_MINIMO * total_max_pct
         aux_min_pct = FACTOR_MINIMO * aux_max_pct
         rep_min_pct = FACTOR_MINIMO * rep_max_pct
     elif 1200 <= ventas_dia < 1500:
-        total_min_pct = 0.25; total_max_pct = 0.27
-        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']; rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
-        aux_min_pct = FACTOR_MINIMO * aux_max_pct; rep_min_pct = FACTOR_MINIMO * rep_max_pct
+        total_min_pct = 0.25
+        total_max_pct = 0.27
+        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']
+        rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
+        aux_min_pct = FACTOR_MINIMO * aux_max_pct
+        rep_min_pct = FACTOR_MINIMO * rep_max_pct
     elif 1500 <= ventas_dia < 1900:
-        total_min_pct = 0.21; total_max_pct = 0.22
-        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']; rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
-        aux_min_pct = FACTOR_MINIMO * aux_max_pct; rep_min_pct = FACTOR_MINIMO * rep_max_pct
+        total_min_pct = 0.21
+        total_max_pct = 0.22
+        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']
+        rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
+        aux_min_pct = FACTOR_MINIMO * aux_max_pct
+        rep_min_pct = FACTOR_MINIMO * rep_max_pct
     elif 1900 <= ventas_dia < 2000:
-        total_min_pct = 0.20; total_max_pct = 0.22
-        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']; rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
-        aux_min_pct = FACTOR_MINIMO * aux_max_pct; rep_min_pct = FACTOR_MINIMO * rep_max_pct
+        total_min_pct = 0.20
+        total_max_pct = 0.22
+        aux_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['aux']
+        rep_max_pct = LIMITES_COSTE_BASE[dia_semana_num]['rep']
+        aux_min_pct = FACTOR_MINIMO * aux_max_pct
+        rep_min_pct = FACTOR_MINIMO * rep_max_pct
     elif 2000 <= ventas_dia < 2500:
-        total_min_pct = 0.19; total_max_pct = 0.21
-        aux_max_pct = 0.07; rep_max_pct = 0.12
-        aux_min_pct = FACTOR_MINIMO * aux_max_pct; rep_min_pct = FACTOR_MINIMO * rep_max_pct
+        total_min_pct = 0.19
+        total_max_pct = 0.21
+        aux_max_pct = 0.07
+        rep_max_pct = 0.12
+        aux_min_pct = FACTOR_MINIMO * aux_max_pct
+        rep_min_pct = FACTOR_MINIMO * rep_max_pct
     else:
-        total_max_pct = 0.19; total_min_pct = 0.165 if ventas_dia > 3000 else 0.17
-        aux_max_pct = 0.07; rep_max_pct = 0.12
-        aux_min_pct = FACTOR_MINIMO * aux_max_pct; rep_min_pct = FACTOR_MINIMO * rep_max_pct
+        total_max_pct = 0.19
+        total_min_pct = 0.165 if ventas_dia > 3000 else 0.17
+        aux_max_pct = 0.07
+        rep_max_pct = 0.12
+        aux_min_pct = FACTOR_MINIMO * aux_max_pct
+        rep_min_pct = FACTOR_MINIMO * rep_max_pct
 
     if aux_max_pct + rep_max_pct > total_max_pct:
         scale = total_max_pct / (aux_max_pct + rep_max_pct)
@@ -433,19 +548,29 @@ def cargar_datos_persistentes():
         if os.path.exists(ARCHIVOS_PERSISTENCIA.get('partidos', '')):
             try:
                 with open(ARCHIVOS_PERSISTENCIA['partidos'], 'r', encoding='utf-8') as f:
-                    st.session_state.fcb_matches = json.load(f)
+                    raw = json.load(f)
+                    matches_list = _normalize_partidos_data(raw)
+                    st.session_state.fcb_matches_list = matches_list
+                    st.session_state.fcb_matches = {rec['fecha']: {'partido': rec.get('partido'), 'hora': rec.get('hora')} for rec in matches_list}
             except Exception:
+                st.session_state.fcb_matches_list = []
                 st.session_state.fcb_matches = {}
         else:
+            st.session_state.fcb_matches_list = []
             st.session_state.fcb_matches = {}
         # Cargar partidos RM persistidos (si existen)
         if os.path.exists(ARCHIVOS_PERSISTENCIA.get('partidos_rm', '')):
             try:
                 with open(ARCHIVOS_PERSISTENCIA['partidos_rm'], 'r', encoding='utf-8') as f:
-                    st.session_state.rm_matches = json.load(f)
+                    raw = json.load(f)
+                    matches_list = _normalize_partidos_data(raw)
+                    st.session_state.rm_matches_list = matches_list
+                    st.session_state.rm_matches = {rec['fecha']: {'partido': rec.get('partido'), 'hora': rec.get('hora')} for rec in matches_list}
             except Exception:
+                st.session_state.rm_matches_list = []
                 st.session_state.rm_matches = {}
         else:
+            st.session_state.rm_matches_list = []
             st.session_state.rm_matches = {}
 
         # --- CARGA POR DEFECTO DESDE ARCHIVOS INCLUIDOS EN EL REPO ---
@@ -548,6 +673,8 @@ def cargar_datos_persistentes():
                 except Exception:
                     return {}
 
+            # removed duplicate helper (moved to top-level)
+
             if (not st.session_state.get('fcb_matches')) and os.path.exists(fcb_xlsx):
                 st.session_state.fcb_matches = load_partidos(fcb_xlsx)
             if (not st.session_state.get('rm_matches')) and os.path.exists(rm_xlsx):
@@ -571,14 +698,26 @@ def guardar_datos(tipo):
                 json.dump(eventos_serializables, f, indent=4)
         elif tipo == 'partidos' and 'fcb_matches' in st.session_state:
             try:
-                with open(ARCHIVOS_PERSISTENCIA['partidos'], 'w', encoding='utf-8') as f:
-                    json.dump(st.session_state.get('fcb_matches', {}), f, indent=4)
+                data_to_write = st.session_state.get('fcb_matches', {}) or {}
+                # Proteccion: no sobrescribir el fichero en disco con un dict vacío
+                fpath = ARCHIVOS_PERSISTENCIA.get('partidos')
+                if not data_to_write and fpath and os.path.exists(fpath):
+                    # mantener archivo existente si está presente y el nuevo contenido es vacío
+                    st.sidebar.info('Saltando guardado de partidos: contenido vacío (evitando sobreescritura).')
+                else:
+                    with open(ARCHIVOS_PERSISTENCIA['partidos'], 'w', encoding='utf-8') as f:
+                        json.dump(data_to_write, f, indent=4)
             except Exception as e:
                 st.sidebar.error(f"Error guardando partidos: {e}")
         elif tipo == 'partidos_rm' and 'rm_matches' in st.session_state:
             try:
-                with open(ARCHIVOS_PERSISTENCIA['partidos_rm'], 'w', encoding='utf-8') as f:
-                    json.dump(st.session_state.get('rm_matches', {}), f, indent=4)
+                data_to_write = st.session_state.get('rm_matches', {}) or {}
+                fpath = ARCHIVOS_PERSISTENCIA.get('partidos_rm')
+                if not data_to_write and fpath and os.path.exists(fpath):
+                    st.sidebar.info('Saltando guardado de partidos RM: contenido vacío (evitando sobreescritura).')
+                else:
+                    with open(ARCHIVOS_PERSISTENCIA['partidos_rm'], 'w', encoding='utf-8') as f:
+                        json.dump(data_to_write, f, indent=4)
             except Exception as e:
                 st.sidebar.error(f"Error guardando partidos RM: {e}")
     except Exception as e:
@@ -832,6 +971,80 @@ def enrich_historico_with_precip():
     except Exception:
         pass
         return None
+
+def _format_partido_with_competition(partido_obj, match_date=None):
+    """Normaliza el texto del partido y añade un sufijo de competición siguiendo reglas:
+    - Si el rival parece extranjero -> (Champions)
+    - Si no es extranjero y el partido cae en viernes/sábado/domingo -> (Liga)
+    - Si no es extranjero y cae entre semana -> (Copa)
+
+    Si `match_date` es None sólo se aplica la detección de rival extranjero
+    (no se añade automáticamente Liga/Copa sin fecha).
+    """
+    try:
+        if isinstance(partido_obj, dict):
+            txt = str(partido_obj.get('partido', '') or '')
+        else:
+            txt = str(partido_obj or '')
+    except Exception:
+        txt = ''
+    txt = txt.strip()
+    # eliminar etiquetas ya existentes entre paréntesis (p.ej. "(Liga)")
+    txt = re.sub(r"\s*\(?\b(?:LALIGA|LA LIGA|LIGA|CHAMPIONS|COPA|SUPERCO|SUPER COPA|SUPER|FASE|FASE LIGA)\b\)?\s*$", "", txt, flags=re.I)
+
+    # Helper: extraer posible rival (parte diferente a FCB/RM)
+    def _extract_any_opponent(s):
+        try:
+            parts = re.split(r"\s*(?:vs|v|\-|@|\|)\s*", s, flags=re.I)
+            for p in parts:
+                clean = p.strip()
+                up = clean.upper()
+                # ignorar referencias obvias a Barcelona/Barça/FCB y RM cuando aparezcan
+                if any(tok in up for tok in ('BARC', 'FCB', 'BARÇA', 'BARCELONA')):
+                    continue
+                if clean:
+                    return clean
+            if len(parts) > 1:
+                return parts[0].strip() if parts[0].strip() else parts[-1].strip()
+            return s.strip()
+        except Exception:
+            return s
+
+    opponent = _extract_any_opponent(txt)
+
+    # heurística para considerar equipo extranjero (lista corta de indicadores)
+    foreign_pattern = re.compile(r"\b(United|City|PSG|Chelsea|Arsenal|Liverpool|Manchester|Inter|Juventus|Bayern|Dortmund|Ajax|Benfica|Porto|Brugge|Newcastle|Eintracht|Paris|Olympiakos|Copenhagen|Kobenhavn|PSV|KRC|Monaco|Slavia|Praha|Prague)\b", flags=re.I)
+    is_foreign = bool(foreign_pattern.search(txt) or foreign_pattern.search(opponent))
+
+    label = ''
+    # If match_date provided, determine weekday and apply weekend/midweek rules
+    if match_date is not None:
+        try:
+            if isinstance(match_date, str):
+                dt = pd.to_datetime(match_date)
+            else:
+                dt = pd.to_datetime(match_date)
+            wd = int(dt.weekday())
+        except Exception:
+            wd = None
+    else:
+        wd = None
+
+    # Priority: foreign -> Champions; else weekend -> Liga; else midweek -> Copa
+    if is_foreign:
+        label = ' (Champions)'
+    else:
+        if wd is None:
+            # without date, do not add Liga/Copa, just return cleaned text
+            label = ''
+        else:
+            # Friday=4, Saturday=5, Sunday=6
+            if wd in (4,5,6):
+                label = ' (Liga)'
+            else:
+                label = ' (Copa)'
+
+    return (txt + label).strip()
 
 def procesar_archivo_partidos(archivo):
     """
@@ -1315,7 +1528,12 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
             wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
             same_wom = candidates[wom_series == wom]
             if not same_wom.empty:
-                chosen_idx = same_wom.index[-1]
+                # escoger la fecha de la misma semana-del-mes más cercana a la fecha objetivo
+                try:
+                    diffs = (same_wom.index - fecha_base_exacta).days.abs()
+                    chosen_idx = diffs.idxmin()
+                except Exception:
+                    chosen_idx = same_wom.index[-1]
                 return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
         # ventana +/-7 días
         try:
@@ -1402,8 +1620,11 @@ def calcular_base_historica_para_dia(fecha_actual, df_base, eventos_dict, exclud
                     diffs_forward = (forward - fecha_base_exacta).days
                     chosen_idx = forward[diffs_forward.argmin()]
                 else:
-                    diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
-                    chosen_idx = diffs.idxmin()
+                    try:
+                        diffs = (same_wom_window.index - fecha_base_exacta).days.abs()
+                        chosen_idx = diffs.idxmin()
+                    except Exception:
+                        chosen_idx = same_wom_window.index[-1]
                 return float(df_base.loc[chosen_idx, 'ventas']), chosen_idx.strftime('%Y-%m-%d')
     except Exception:
         pass
@@ -1430,7 +1651,13 @@ def obtener_dia_base_historica(fecha_actual, df_historico):
             wom_series = pd.Series([week_of_month_custom(d) for d in candidates.index.day], index=candidates.index)
             same_wom = candidates[wom_series == wom]
             if not same_wom.empty:
-                fecha_base = same_wom.index[-1]
+                # elegir la fecha más cercana a la fecha objetivo en el año base
+                try:
+                    fecha_objetivo = fecha_actual.replace(year=base_year)
+                    diffs = (same_wom.index - fecha_objetivo).days.abs()
+                    fecha_base = diffs.idxmin()
+                except Exception:
+                    fecha_base = same_wom.index[-1]
                 ventas_base = float(df_base_month.loc[fecha_base, 'ventas'])
                 return fecha_base.strftime('%Y-%m-%d'), ventas_base
             # fallback: nearest same weekday in month
@@ -1507,59 +1734,84 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 decay_factor = avg_wom / first_wom_avg if first_wom_avg > 0 else 1.0
                 decay_factors[wom] = np.clip(decay_factor, 0.8, 1.2)
 
-        # --- Nuevo: determinar la fecha de inicio de la semana en el año base POR CADA DÍA
-        # Esto asegura que, para días en los primeros días del año, la comparación
-        # se haga respecto al año anterior de ese día concreto (fecha.year - 1).
-        base_week_starts = [None] * 7
+        # --- Nuevo: determinar la fecha de inicio de la semana en el año base PARA LA SEMANA ENTERA
+        # Queremos que toda la semana se mapee a la misma semana del año base (mismo lunes + offsets).
         try:
-            for j in range(7):
-                target_date = fecha_inicio_semana + timedelta(days=j)
-                # Si el día objetivo es festivo en el año objetivo, no generamos
-                # un `base_week_start` por semana: queremos que los festivos usen
-                # la comparación directa por día/mes en el año base.
-                try:
-                    if es_festivo(target_date):
-                        base_week_starts[j] = None
-                        continue
-                except Exception:
-                    pass
-                target_wom = week_of_month_custom(target_date)
-                target_base_year = target_date.year - 1
-                fecha_inicio_base_candidate = target_date.replace(year=target_base_year)
-                # Dataset del año base específico para este día
-                df_base_year = df_historico[df_historico.index.year == target_base_year]
-                if df_base_year.empty:
-                    base_week_starts[j] = None
-                    continue
-                # Buscar lunes en el mismo mes del año base
-                df_base_month = df_base_year[df_base_year.index.month == target_date.month]
-                mondays = df_base_month[df_base_month.index.weekday == 0].copy()
-                chosen = None
-                if not mondays.empty:
-                    wom_series = pd.Series([week_of_month_custom(d) for d in mondays.index.day], index=mondays.index)
-                    same_wom = mondays[wom_series == target_wom]
-                    if not same_wom.empty:
-                        forward = same_wom[same_wom.index >= fecha_inicio_base_candidate]
-                        if len(forward) > 0:
-                            diffs_forward = (forward.index - fecha_inicio_base_candidate).days
-                            chosen = forward.index[diffs_forward.argmin()]
-                        else:
-                            chosen = same_wom.index[-1]
-                # Si no hay candidato en el mismo mes, buscar en ventana +-7 días alrededor
-                if chosen is None:
-                    ventana_start = fecha_inicio_base_candidate - timedelta(days=7)
-                    ventana_end = fecha_inicio_base_candidate + timedelta(days=7)
-                    df_window = df_base_year[(df_base_year.index >= ventana_start) & (df_base_year.index <= ventana_end)].copy()
-                    window_mondays = df_window[df_window.index.weekday == 0]
-                    if not window_mondays.empty:
-                        forward = window_mondays[window_mondays.index >= fecha_inicio_base_candidate]
-                        if len(forward) > 0:
-                            diffs_forward = (forward.index - fecha_inicio_base_candidate).days
-                            chosen = forward.index[diffs_forward.argmin()]
-                        else:
-                            diffs = (window_mondays.index - fecha_inicio_base_candidate).days.abs()
-                            chosen = diffs.idxmin()
-                base_week_starts[j] = chosen
+            # calcular base monday candidato usando la fecha de inicio de la semana (lunes)
+            target_monday = fecha_inicio_semana
+            base_week_monday = None
+            try:
+                if es_festivo(target_monday):
+                    base_week_monday = None
+                else:
+                    target_wom = week_of_month_custom(target_monday)
+                    target_base_year = target_monday.year - 1
+                    fecha_inicio_base_candidate = target_monday.replace(year=target_base_year)
+                    # buscar lunes en el mes del año base
+                    df_base_year = df_historico[df_historico.index.year == target_base_year]
+                    if not df_base_year.empty:
+                        df_base_month = df_base_year[df_base_year.index.month == target_monday.month]
+                        mondays = df_base_month[df_base_month.index.weekday == 0].copy()
+                        chosen = None
+                        if not mondays.empty:
+                            wom_series = pd.Series([week_of_month_custom(d) for d in mondays.index.day], index=mondays.index)
+                            same_wom = mondays[wom_series == target_wom]
+                            if not same_wom.empty:
+                                forward = same_wom[same_wom.index >= fecha_inicio_base_candidate]
+                                if len(forward) > 0:
+                                    diffs_forward = (forward.index - fecha_inicio_base_candidate).days
+                                    chosen = forward.index[diffs_forward.argmin()]
+                                else:
+                                    try:
+                                        diffs = (same_wom.index - fecha_inicio_base_candidate).days.abs()
+                                        chosen = diffs.idxmin()
+                                    except Exception:
+                                        chosen = same_wom.index[-1]
+                        if chosen is None:
+                            ventana_start = fecha_inicio_base_candidate - timedelta(days=7)
+                            ventana_end = fecha_inicio_base_candidate + timedelta(days=7)
+                            df_window = df_base_year[(df_base_year.index >= ventana_start) & (df_base_year.index <= ventana_end)].copy()
+                            window_mondays = df_window[df_window.index.weekday == 0]
+                            if not window_mondays.empty:
+                                forward = window_mondays[window_mondays.index >= fecha_inicio_base_candidate]
+                                if len(forward) > 0:
+                                    diffs_forward = (forward.index - fecha_inicio_base_candidate).days
+                                    chosen = forward.index[diffs_forward.argmin()]
+                                else:
+                                    diffs = (window_mondays.index - fecha_inicio_base_candidate).days.abs()
+                                    chosen = diffs.idxmin()
+                        base_week_monday = chosen
+            except Exception:
+                base_week_monday = None
+
+            # Si la semana mapeada contiene un festivo/víspera en el año base y
+            # la semana actual NO lo tiene, preferimos desplazar la semana base
+            # hacia adelante una semana (hasta 3 intentos) para evitar comparar
+            # festivos del año base contra días normales del año actual.
+            if base_week_monday is not None:
+                attempts = 0
+                while attempts < 3:
+                    conflict = False
+                    for jj in range(7):
+                        mapped = base_week_monday + timedelta(days=jj)
+                        cur = fecha_inicio_semana + timedelta(days=jj)
+                        try:
+                            mapped_is_vip = (mapped in festivos_es) or es_vispera_de_festivo(mapped)
+                        except Exception:
+                            mapped_is_vip = False
+                        try:
+                            cur_is_vip = (cur in festivos_es) or es_vispera_de_festivo(cur)
+                        except Exception:
+                            cur_is_vip = False
+                        if mapped_is_vip and (not cur_is_vip):
+                            conflict = True
+                            break
+                    if not conflict:
+                        break
+                    base_week_monday = base_week_monday + timedelta(days=7)
+                    attempts += 1
+
+            base_week_starts = [base_week_monday] * 7
         except Exception:
             base_week_starts = [None] * 7
     
@@ -2453,6 +2705,7 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
 
         # Calcular la 'Media FCB VS' — media del % de cambio para partidos contra el mismo rival
         media_fcb_vs = None
+        media_fcb_reason = None
         try:
             # Helper local: extrae y limpia el nombre del rival de una cadena/dict partido
             def _extract_and_clean(partido_text):
@@ -2483,7 +2736,8 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     if not chosen:
                         return None
                     # eliminar tokens comunes de competición y temporadas (e.g., 'LaLiga', 'Champions', '25/26')
-                    chosen = re.sub(r"\b(LALIGA|LA LIGA|CHAMPIONS|COPA|SUPERCO|SUPER COPA|SUPER|FASE|FASE|FASE LIGA)\b", "", chosen, flags=re.I)
+                    # también eliminar si vienen entre paréntesis (p.ej. ' (Liga)')
+                    chosen = re.sub(r"\(?\b(LALIGA|LA LIGA|LIGA|CHAMPIONS|COPA|SUPERCO|SUPER COPA|SUPER|FASE|FASE LIGA)\b\)?", "", chosen, flags=re.I)
                     chosen = re.sub(r"\d{2}(?:/\d{2})?", "", chosen)
                     # limpiar caracteres sobrantes
                     chosen = re.sub(r"[^0-9A-Za-z\s]", "", chosen)
@@ -2497,11 +2751,82 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             except Exception:
                 opponent_norm = None
 
-            if opponent_norm:
-                fcb_dict = st.session_state.get('fcb_matches', {})
-                pcts = []
+            # Prepare matches map and compute format-level averages across all historical matches
+            fcb_dict = st.session_state.get('fcb_matches', {})
+            fmt_pcts_all = {'Liga': [], 'Champions': [], 'Copa': []}
+            try:
                 for d_str, match_obj in (fcb_dict or {}).items():
-                    # Ignorar partidos históricas cuya hora esté dentro de la ventana 11:00-18:30
+                    # ignore matches in time-window
+                    if _match_time_in_ignore_window(match_obj):
+                        continue
+                    try:
+                        d_dt = pd.to_datetime(d_str)
+                    except Exception:
+                        continue
+                    if d_dt not in df_historico.index:
+                        continue
+                    try:
+                        ventas_partido = float(df_historico.loc[d_dt, 'ventas'])
+                    except Exception:
+                        continue
+                    # baseline: mean of up to 3 prev occurrences (weekday)
+                    occ_same_wd = df_historico[df_historico.index.weekday == d_dt.weekday()].sort_index()
+                    occ_prev = occ_same_wd[occ_same_wd.index < d_dt]
+                    prev_vals = []
+                    for dd in reversed(list(occ_prev.index)):
+                        dd_str = dd.strftime('%Y-%m-%d')
+                        if dd_str in fcb_dict:
+                            continue
+                        try:
+                            if es_festivo(dd) or es_vispera_de_festivo(dd):
+                                continue
+                        except Exception:
+                            pass
+                        prev_vals.append(float(df_historico.loc[dd, 'ventas']))
+                        if len(prev_vals) >= 3:
+                            break
+                    if len(prev_vals) == 0:
+                        continue
+                    mean_prev = float(np.mean(prev_vals))
+                    if mean_prev <= 0:
+                        continue
+                    pct = (ventas_partido - mean_prev) / mean_prev
+                    # determine format label for this historical match
+                    try:
+                        fmt_label = None
+                        try:
+                            formatted = _format_partido_with_competition(match_obj, d_dt)
+                            m = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted)
+                            if m:
+                                fmt_label = m.group(1)
+                        except Exception:
+                            fmt_label = None
+                        if not fmt_label:
+                            try:
+                                txt = match_obj.get('partido') if isinstance(match_obj, dict) else str(match_obj)
+                                m2 = re.search(r"\((Liga|Champions|Copa)\)", txt)
+                                if m2:
+                                    fmt_label = m2.group(1)
+                            except Exception:
+                                fmt_label = None
+                        if fmt_label in fmt_pcts_all:
+                            fmt_pcts_all[fmt_label].append(pct)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # convert format pcts to percentage values
+            media_fcb_by_format = {}
+            for k, arr in fmt_pcts_all.items():
+                media_fcb_by_format[k] = float(np.mean(arr)) * 100.0 if arr else None
+
+            # Now compute opponent-specific pcts
+            pcts = []
+            # also compute format-level means for opponent-matching (kept for compatibility)
+            fmt_pcts = {'Liga': [], 'Champions': [], 'Copa': []}
+            for d_str, match_obj in (fcb_dict or {}).items():
+                    # Ignorar partidos históricas cuya hora esté dentro de la ventana 12:00-18:00
                     if _match_time_in_ignore_window(match_obj):
                         continue
                     try:
@@ -2543,11 +2868,52 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                         continue
                     mean_prev = float(np.mean(prev_vals))
                     if mean_prev > 0:
-                        pcts.append((ventas_partido - mean_prev) / mean_prev)
-                if pcts:
-                    media_fcb_vs = float(np.mean(pcts)) * 100.0
+                        pct = (ventas_partido - mean_prev) / mean_prev
+                        pcts.append(pct)
+                        # determine format for this historical match (try to read explicit label, else infer from date)
+                        try:
+                            # match_obj may be dict or string; use formatted label when possible
+                            try:
+                                match_date_dt = pd.to_datetime(d_str)
+                            except Exception:
+                                match_date_dt = None
+                            fmt_label = None
+                            if match_date_dt is not None:
+                                try:
+                                    formatted = _format_partido_with_competition(match_obj, match_date_dt)
+                                    # extract trailing label in parentheses
+                                    m = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted)
+                                    if m:
+                                        fmt_label = m.group(1)
+                                except Exception:
+                                    fmt_label = None
+                            if not fmt_label:
+                                # try to parse explicit '(Liga)' etc from raw text
+                                try:
+                                    txt = match_obj.get('partido') if isinstance(match_obj, dict) else str(match_obj)
+                                    m2 = re.search(r"\((Liga|Champions|Copa)\)", txt)
+                                    if m2:
+                                        fmt_label = m2.group(1)
+                                except Exception:
+                                    fmt_label = None
+                            if fmt_label in fmt_pcts:
+                                    fmt_pcts[fmt_label].append(pct)
+                        except Exception:
+                            pass
+                    if pcts:
+                        media_fcb_vs = float(np.mean(pcts)) * 100.0
+                        media_fcb_reason = 'h2h_found'
+                    else:
+                        # no head-to-head data; fallback to format averages if available
+                        media_fcb_vs = None
+                        if any(v is not None for v in media_fcb_by_format.values()):
+                            media_fcb_reason = 'no_h2h_but_format'
+                        else:
+                            media_fcb_reason = 'no_data'
         except Exception:
-            media_fcb_vs = None
+                media_fcb_vs = None
+                media_fcb_by_format = {'Liga': None, 'Champions': None, 'Copa': None}
+                media_fcb_reason = 'error'
 
         # Aplicar ajuste por partido FCB si procede (cuando hay partido en año base y hoy hay partido/manual describe 'FCB')
         try:
@@ -2570,20 +2936,65 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             fcb_source_used = None
             try:
                 if apply_fcb:
-                    if media_fcb_vs is not None:
-                        impacto_fcb = 1.0 + (float(media_fcb_vs) / 100.0)
+                    # determine competition format for today's match
+                    fmt_label = None
+                    try:
+                        if match_today_obj_local:
+                            formatted_today = _format_partido_with_competition(match_today_obj_local, fecha_actual)
+                            m_fmt = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted_today)
+                            if m_fmt:
+                                fmt_label = m_fmt.group(1)
+                    except Exception:
+                        fmt_label = None
+
+                    # fallback: infer format from date if none found
+                    if not fmt_label:
+                        try:
+                            formatted_infer = _format_partido_with_competition('', fecha_actual)
+                            m2 = re.search(r"\((Liga|Champions|Copa)\)", formatted_infer)
+                            if m2:
+                                fmt_label = m2.group(1)
+                        except Exception:
+                            fmt_label = None
+
+                    # decide impacts
+                    impacto_h2h = None
+                    impacto_fmt = None
+                    try:
+                        if media_fcb_vs is not None:
+                            impacto_h2h = 1.0 + (float(media_fcb_vs) / 100.0)
+                    except Exception:
+                        impacto_h2h = None
+                    try:
+                        if 'media_fcb_by_format' in locals() and fmt_label in media_fcb_by_format and media_fcb_by_format.get(fmt_label) is not None:
+                            impacto_fmt = 1.0 + (float(media_fcb_by_format.get(fmt_label)) / 100.0)
+                    except Exception:
+                        impacto_fmt = None
+
+                    # Combine according to rules: if head-to-head exists, apply both head-to-head AND format average.
+                    # If no head-to-head, apply only format average. If neither, no impact.
+                    impacto_total = 1.0
+                    if impacto_h2h is not None and impacto_fmt is not None:
+                        impacto_total = impacto_h2h * impacto_fmt
+                        fcb_source_used = 'media_fcb_vs+format'
+                    elif impacto_h2h is not None:
+                        impacto_total = impacto_h2h
                         fcb_source_used = 'media_fcb_vs'
+                    elif impacto_fmt is not None:
+                        impacto_total = impacto_fmt
+                        fcb_source_used = 'format_avg'
                     else:
-                        impacto_fcb = 1.0
+                        impacto_total = 1.0
                         fcb_source_used = None
 
                     try:
                         pred_before_fcb = float(prediccion_final)
                     except Exception:
                         pred_before_fcb = None
-                    # Aplicar ajuste si hay media histórica válida
-                    if impacto_fcb != 1.0:
-                        prediccion_final = prediccion_final * impacto_fcb
+
+                    # Aplicar ajuste si hay impacto distinto de 1.0
+                    if impacto_total != 1.0:
+                        prediccion_final = prediccion_final * impacto_total
                     # Añadir etiqueta de partido/FCB al tipo_evento aunque no haya media
                     try:
                         if 'PARTIDO' not in (tipo_evento or '').upper() and 'FCB' not in (tipo_evento or '').upper():
@@ -2613,6 +3024,7 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
         rm_match_today = None
         rm_match_base = None
         media_rm_vs = None
+        media_rm_reason = None
         rm_source_used = None
         try:
             rm_dict = st.session_state.get('rm_matches', {})
@@ -2664,8 +3076,75 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                 opponent_norm_rm = _extract_and_clean_rm(rm_match_today) or _extract_and_clean_rm(rm_match_base)
             except Exception:
                 opponent_norm_rm = None
+
+            # compute global format averages (fallback)
+            fmt_pcts_all_rm = {'Liga': [], 'Champions': [], 'Copa': []}
+            try:
+                for d_str, match_obj in (rm_dict or {}).items():
+                    if _match_time_in_ignore_window(match_obj):
+                        continue
+                    try:
+                        d_dt = pd.to_datetime(d_str)
+                    except Exception:
+                        continue
+                    if d_dt not in df_historico.index:
+                        continue
+                    try:
+                        ventas_partido = float(df_historico.loc[d_dt, 'ventas'])
+                    except Exception:
+                        continue
+                    occ_same_wd = df_historico[df_historico.index.weekday == d_dt.weekday()].sort_index()
+                    occ_prev = occ_same_wd[occ_same_wd.index < d_dt]
+                    prev_vals = []
+                    for dd in reversed(list(occ_prev.index)):
+                        dd_str = dd.strftime('%Y-%m-%d')
+                        if dd_str in rm_dict:
+                            continue
+                        try:
+                            if es_festivo(dd) or es_vispera_de_festivo(dd):
+                                continue
+                        except Exception:
+                            pass
+                        prev_vals.append(float(df_historico.loc[dd, 'ventas']))
+                        if len(prev_vals) >= 3:
+                            break
+                    if len(prev_vals) == 0:
+                        continue
+                    mean_prev = float(np.mean(prev_vals))
+                    if mean_prev <= 0:
+                        continue
+                    pct_rm = (ventas_partido - mean_prev) / mean_prev
+                    try:
+                        fmt_label = None
+                        try:
+                            formatted = _format_partido_with_competition(match_obj, d_dt)
+                            m = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted)
+                            if m:
+                                fmt_label = m.group(1)
+                        except Exception:
+                            fmt_label = None
+                        if not fmt_label:
+                            try:
+                                txt = match_obj.get('partido') if isinstance(match_obj, dict) else str(match_obj)
+                                m2 = re.search(r"\((Liga|Champions|Copa)\)", txt)
+                                if m2:
+                                    fmt_label = m2.group(1)
+                            except Exception:
+                                fmt_label = None
+                        if fmt_label in fmt_pcts_all_rm:
+                            fmt_pcts_all_rm[fmt_label].append(pct_rm)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            media_rm_by_format = {}
+            for k, arr in fmt_pcts_all_rm.items():
+                media_rm_by_format[k] = float(np.mean(arr)) * 100.0 if arr else None
+
             if opponent_norm_rm:
                 pcts_rm = []
+                fmt_pcts_rm = {'Liga': [], 'Champions': [], 'Copa': []}
                 for d_str, match_obj in (rm_dict or {}).items():
                     # Ignorar partidos históricas cuya hora esté dentro de la ventana 11:00-18:30
                     if _match_time_in_ignore_window(match_obj):
@@ -2707,11 +3186,47 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                         continue
                     mean_prev = float(np.mean(prev_vals))
                     if mean_prev > 0:
-                        pcts_rm.append((ventas_partido - mean_prev) / mean_prev)
+                        pct_rm = (ventas_partido - mean_prev) / mean_prev
+                        pcts_rm.append(pct_rm)
+                        try:
+                            try:
+                                match_date_dt = pd.to_datetime(d_str)
+                            except Exception:
+                                match_date_dt = None
+                            fmt_label = None
+                            if match_date_dt is not None:
+                                try:
+                                    formatted = _format_partido_with_competition(match_obj, match_date_dt)
+                                    m = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted)
+                                    if m:
+                                        fmt_label = m.group(1)
+                                except Exception:
+                                    fmt_label = None
+                            if not fmt_label:
+                                try:
+                                    txt = match_obj.get('partido') if isinstance(match_obj, dict) else str(match_obj)
+                                    m2 = re.search(r"\((Liga|Champions|Copa)\)", txt)
+                                    if m2:
+                                        fmt_label = m2.group(1)
+                                except Exception:
+                                    fmt_label = None
+                            if fmt_label in fmt_pcts_rm:
+                                fmt_pcts_rm[fmt_label].append(pct_rm)
+                        except Exception:
+                            pass
                 if pcts_rm:
                     media_rm_vs = float(np.mean(pcts_rm)) * 100.0
+                    media_rm_reason = 'h2h_found'
+                else:
+                    media_rm_vs = None
+                    if any(v is not None for v in media_rm_by_format.values()):
+                        media_rm_reason = 'no_h2h_but_format'
+                    else:
+                        media_rm_reason = 'no_data'
         except Exception:
             media_rm_vs = None
+            media_rm_by_format = {'Liga': None, 'Champions': None, 'Copa': None}
+            media_rm_reason = 'error'
 
         # apply RM adjustment similar to FCB
         try:
@@ -2733,11 +3248,52 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     except Exception:
                         pred_before_rm = None
 
-                    if media_rm_vs is not None:
-                        impacto_rm = 1.0 + (float(media_rm_vs) / 100.0)
+                    # determine competition format for today's RM match
+                    fmt_label_rm = None
+                    try:
+                        if match_today_obj_rm:
+                            formatted_rm_today = _format_partido_with_competition(match_today_obj_rm, fecha_actual)
+                            m_fmt_rm = re.search(r"\((Liga|Champions|Copa)\)\s*$", formatted_rm_today)
+                            if m_fmt_rm:
+                                fmt_label_rm = m_fmt_rm.group(1)
+                    except Exception:
+                        fmt_label_rm = None
+
+                    if not fmt_label_rm:
+                        try:
+                            formatted_infer_rm = _format_partido_with_competition('', fecha_actual)
+                            m2rm = re.search(r"\((Liga|Champions|Copa)\)", formatted_infer_rm)
+                            if m2rm:
+                                fmt_label_rm = m2rm.group(1)
+                        except Exception:
+                            fmt_label_rm = None
+
+                    impacto_h2h_rm = None
+                    impacto_fmt_rm = None
+                    try:
+                        if media_rm_vs is not None:
+                            impacto_h2h_rm = 1.0 + (float(media_rm_vs) / 100.0)
+                    except Exception:
+                        impacto_h2h_rm = None
+                    try:
+                        if 'media_rm_by_format' in locals() and fmt_label_rm in media_rm_by_format and media_rm_by_format.get(fmt_label_rm) is not None:
+                            impacto_fmt_rm = 1.0 + (float(media_rm_by_format.get(fmt_label_rm)) / 100.0)
+                    except Exception:
+                        impacto_fmt_rm = None
+
+                    # Combine impacts: head-to-head AND format if both exist; else only format; else only h2h; else none
+                    impacto_total_rm = 1.0
+                    if impacto_h2h_rm is not None and impacto_fmt_rm is not None:
+                        impacto_total_rm = impacto_h2h_rm * impacto_fmt_rm
+                        rm_source_used = 'media_rm_vs+format'
+                    elif impacto_h2h_rm is not None:
+                        impacto_total_rm = impacto_h2h_rm
                         rm_source_used = 'media_rm_vs'
+                    elif impacto_fmt_rm is not None:
+                        impacto_total_rm = impacto_fmt_rm
+                        rm_source_used = 'format_avg'
                     else:
-                        impacto_rm = 1.0
+                        impacto_total_rm = 1.0
                         rm_source_used = None
 
                     # Construir etiqueta 'RM vs {opponent}' para mostrar en evento (si es posible)
@@ -2763,17 +3319,21 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                             except Exception:
                                 return None
 
-                        rm_opponent = extract_opponent_rm(rm_match_today)
-                        if rm_opponent:
+                        # Use formatted partido to include competition label when possible
+                        formatted_rm = _format_partido_with_competition(rm_match_today, fecha_actual)
+                        rm_opponent = extract_opponent_rm(formatted_rm or rm_match_today)
+                        if formatted_rm:
+                            rm_label = formatted_rm
+                        elif rm_opponent:
                             rm_label = f"RM vs {rm_opponent}"
                         else:
                             rm_label = 'RM'
                     except Exception:
                         rm_label = 'RM'
 
-                    # Aplicar ajuste si hay media histórica válida
-                    if impacto_rm != 1.0:
-                        prediccion_final = prediccion_final * impacto_rm
+                    # Aplicar ajuste si hay impacto calculado
+                    if impacto_total_rm != 1.0:
+                        prediccion_final = prediccion_final * impacto_total_rm
 
                     # Añadir la etiqueta RM/partido al tipo_evento aunque no exista media
                     try:
@@ -2968,8 +3528,12 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
                     return None
 
             if fcb_match_today:
-                opponent = extract_opponent(fcb_match_today)
-                if opponent:
+                # Prefer using the formatted partido (may include competition label)
+                formatted = _format_partido_with_competition(fcb_match_today, fecha_actual)
+                opponent = extract_opponent(formatted or fcb_match_today)
+                if formatted:
+                    fcb_label = formatted
+                elif opponent:
                     fcb_label = f"FCB vs {opponent}"
                 else:
                     fcb_label = "FCB"
@@ -3042,12 +3606,22 @@ def calcular_prediccion_semana(fecha_inicio_semana_date):
             'base_historica_sin_partido': base_historica_sin_partido if 'base_historica_sin_partido' in locals() else None,
             'media_fcb_vs': media_fcb_vs,
             'fcb_source_used': fcb_source_used if 'fcb_source_used' in locals() else None,
+            'media_fcb_reason': media_fcb_reason if 'media_fcb_reason' in locals() else None,
             'rm_match_today': rm_match_today if 'rm_match_today' in locals() else None,
             'rm_match_base': rm_match_base if 'rm_match_base' in locals() else None,
             'rm_pct_base': (float(rm_pct_base) * 100) if (rm_pct_base is not None) else None,
             'media_rm_vs': media_rm_vs if 'media_rm_vs' in locals() else None,
             'rm_source_used': rm_source_used if 'rm_source_used' in locals() else None,
+            'media_rm_reason': media_rm_reason if 'media_rm_reason' in locals() else None,
+            # Auditoría: porcentajes y efecto combinado (FCB)
+            'fcb_head2head_pct': media_fcb_vs if 'media_fcb_vs' in locals() else None,
+            'fcb_format_avg_pct': (media_fcb_by_format.get(fmt_label) if ('media_fcb_by_format' in locals() and 'fmt_label' in locals() and fmt_label in media_fcb_by_format) else None),
+            'fcb_impacto_combinado': ((impacto_total - 1.0) * 100.0) if 'impacto_total' in locals() else None,
             'pred_before_rm': pred_before_rm if 'pred_before_rm' in locals() else None,
+            # Auditoría: porcentajes y efecto combinado (RM)
+            'rm_head2head_pct': media_rm_vs if 'media_rm_vs' in locals() else None,
+            'rm_format_avg_pct': (media_rm_by_format.get(fmt_label_rm) if ('media_rm_by_format' in locals() and 'fmt_label_rm' in locals() and fmt_label_rm in media_rm_by_format) else None),
+            'rm_impacto_combinado': ((impacto_total_rm - 1.0) * 100.0) if 'impacto_total_rm' in locals() else None,
             'sanity_clipped': sanity_clipped if 'sanity_clipped' in locals() else False,
             'sanity_lower': clipped_lower if 'clipped_lower' in locals() else None,
             'sanity_upper': clipped_upper if 'clipped_upper' in locals() else None,
@@ -4297,12 +4871,32 @@ with st.sidebar.expander("Ver / Eliminar Eventos Guardados"):
 
     with st.sidebar.expander("Ver / Eliminar Partidos FCB Guardados"):
         partidos = st.session_state.get('fcb_matches', {})
+        # Diagnostics: show whether the persistence file exists and how many entries it contains
+        try:
+            fpath = ARCHIVOS_PERSISTENCIA.get('partidos')
+            if fpath and os.path.exists(fpath):
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as _f:
+                        raw_disk = json.load(_f)
+                    if isinstance(raw_disk, dict):
+                        disk_count = len(raw_disk)
+                    elif isinstance(raw_disk, list):
+                        disk_count = len(raw_disk)
+                    else:
+                        disk_count = 0
+                    st.caption(f"Archivo en disco: {fpath} — entradas: {disk_count}")
+                except Exception as e:
+                    st.caption(f"Archivo en disco: {fpath} — error leyendo: {e}")
+            else:
+                st.caption(f"Archivo en disco: {fpath} — no existe")
+        except Exception:
+            pass
         if not partidos:
             st.write("No hay partidos FCB guardados.")
         else:
             df_partidos_data = []
             for fecha, desc in partidos.items():
-                df_partidos_data.append({'Fecha': fecha, 'Partido': desc})
+                    df_partidos_data.append({'Fecha': fecha, 'Partido': _format_partido_with_competition(desc, fecha)})
             df_partidos = pd.DataFrame(df_partidos_data).set_index('Fecha').sort_index()
             partido_a_eliminar = st.selectbox("Selecciona un partido para eliminar", options=[""] + list(df_partidos.index), key="sel_eliminar_partido")
             if partido_a_eliminar:
@@ -4313,12 +4907,31 @@ with st.sidebar.expander("Ver / Eliminar Eventos Guardados"):
 
     with st.sidebar.expander("Ver / Eliminar Partidos RM Guardados"):
         partidos_rm = st.session_state.get('rm_matches', {})
+        try:
+            fpath_rm = ARCHIVOS_PERSISTENCIA.get('partidos_rm')
+            if fpath_rm and os.path.exists(fpath_rm):
+                try:
+                    with open(fpath_rm, 'r', encoding='utf-8') as _f:
+                        raw_disk_rm = json.load(_f)
+                    if isinstance(raw_disk_rm, dict):
+                        disk_count_rm = len(raw_disk_rm)
+                    elif isinstance(raw_disk_rm, list):
+                        disk_count_rm = len(raw_disk_rm)
+                    else:
+                        disk_count_rm = 0
+                    st.caption(f"Archivo en disco: {fpath_rm} — entradas: {disk_count_rm}")
+                except Exception as e:
+                    st.caption(f"Archivo en disco: {fpath_rm} — error leyendo: {e}")
+            else:
+                st.caption(f"Archivo en disco: {fpath_rm} — no existe")
+        except Exception:
+            pass
         if not partidos_rm:
             st.write("No hay partidos RM guardados.")
         else:
             df_partidos_data_rm = []
             for fecha, desc in partidos_rm.items():
-                df_partidos_data_rm.append({'Fecha': fecha, 'Partido': desc})
+                df_partidos_data_rm.append({'Fecha': fecha, 'Partido': _format_partido_with_competition(desc, fecha)})
             df_partidos_rm = pd.DataFrame(df_partidos_data_rm).set_index('Fecha').sort_index()
             partido_rm_a_eliminar = st.selectbox("Selecciona un partido RM para eliminar", options=[""] + list(df_partidos_rm.index), key="sel_eliminar_partido_rm")
             if partido_rm_a_eliminar:
@@ -4789,6 +5402,8 @@ if col_fd.button("⚽Importar partidos RM y FCB", key='btn_import_fd'):
     except Exception as e:
         st.error(f"Error al importar partidos: {e}")
 
+        
+
 if col_calc.button("🚀 Calcular Predicción y Optimización", type="primary", disabled=not calculo_final_disponible):
     if 'df_prediccion' in st.session_state:
         del st.session_state.df_prediccion
@@ -4824,6 +5439,34 @@ if col_calc.button("🚀 Calcular Predicción y Optimización", type="primary", 
         pass
 
     with st.spinner("Calculando predicción..."):
+        # Restaurar partidos persistidos desde disco en caso de que la sesión los haya perdido
+        try:
+            fpath = ARCHIVOS_PERSISTENCIA.get('partidos')
+            if fpath and os.path.exists(fpath) and not st.session_state.get('fcb_matches'):
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as _f:
+                        raw = json.load(_f)
+                    matches_list = _normalize_partidos_data(raw)
+                    st.session_state.fcb_matches_list = matches_list
+                    st.session_state.fcb_matches = {rec['fecha']: {'partido': rec.get('partido'), 'hora': rec.get('hora')} for rec in matches_list}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            fpath_rm = ARCHIVOS_PERSISTENCIA.get('partidos_rm')
+            if fpath_rm and os.path.exists(fpath_rm) and not st.session_state.get('rm_matches'):
+                try:
+                    with open(fpath_rm, 'r', encoding='utf-8') as _f:
+                        raw_rm = json.load(_f)
+                    matches_list_rm = _normalize_partidos_data(raw_rm)
+                    st.session_state.rm_matches_list = matches_list_rm
+                    st.session_state.rm_matches = {rec['fecha']: {'partido': rec.get('partido'), 'hora': rec.get('hora')} for rec in matches_list_rm}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         df_prediccion = safe_calcular_prediccion_semana(fecha_inicio_seleccionada)
         # Normalize accidental tuple returns (e.g., (df, status)) to just the DataFrame
         try:
@@ -4924,10 +5567,14 @@ if display_results:
                 fecha_dt = pd.to_datetime(fecha_str)
             except Exception:
                 continue
-            # buscar ventas en la fecha del partido (si existe)
-            if fecha_dt not in df_h.index:
-                continue
-            ventas_partido = float(df_h.loc[fecha_dt, 'ventas'])
+            # buscar ventas en la fecha del partido (si existe). Si no existen,
+            # permitimos seguir y mostrar la fila con NaN para trazabilidad.
+            ventas_partido = np.nan
+            try:
+                if fecha_dt in df_h.index:
+                    ventas_partido = float(df_h.loc[fecha_dt, 'ventas'])
+            except Exception:
+                ventas_partido = np.nan
             # buscar hasta 3 previos mismos weekday en ese año excluyendo partidos/festivos/vísperas
             year = fecha_dt.year
             occ_same = df_h[(df_h.index.year == year) & (df_h.index.weekday == fecha_dt.weekday())].sort_index()
@@ -4942,10 +5589,15 @@ if display_results:
                 prev_filtered.append(float(df_h.loc[d, 'ventas']))
                 if len(prev_filtered) >= 3:
                     break
+            # Si no hay previos filtrados, registramos NaN en la media y en el
+            # porcentaje; no descartamos la fila para que el partido aparezca
+            # en la lista (útil cuando no tenemos ventas históricas de ese año).
             if len(prev_filtered) == 0:
-                continue
-            mean_prev = float(np.mean(prev_filtered))
-            pct = (ventas_partido - mean_prev) / mean_prev if mean_prev > 0 else 0.0
+                mean_prev = np.nan
+                pct = np.nan
+            else:
+                mean_prev = float(np.mean(prev_filtered))
+                pct = (ventas_partido - mean_prev) / mean_prev if mean_prev > 0 else 0.0
             partido_desc = None
             hora_desc = None
             if isinstance(val, dict):
@@ -4953,6 +5605,7 @@ if display_results:
                 hora_desc = val.get('hora')
             else:
                 partido_desc = val
+            partido_desc = _format_partido_with_competition(partido_desc, fecha_dt)
             impacto_rows.append({
                 'fecha': fecha_dt,
                 'partido': partido_desc,
@@ -4970,12 +5623,29 @@ if display_results:
             with st.expander('Partidos FCB con mayor impacto histórico (ordenados)', expanded=False):
                 st.markdown('Resumen de partidos detectados y su impacto relativo sobre ventas (comparado con media de hasta 3 días previos same-weekday).')
                 # filtros
-                cols = st.columns([1,1,1,1])
+                cols = st.columns([1,1,1,1,1])
                 with cols[0]:
                     top_n = st.number_input('Mostrar top N', min_value=1, max_value=50, value=10, step=1)
                 with cols[1]:
                     sign_filter = st.selectbox('Tipo', options=['Todos','Aumento','Disminución'])
+                # añadir selector de año para filtrar los partidos mostrados
                 with cols[2]:
+                    try:
+                        years_df = sorted(df_imp['fecha'].dt.year.unique().tolist()) if 'fecha' in df_imp.columns else []
+                        years_matches = []
+                        try:
+                            f_list = st.session_state.get('fcb_matches_list', []) or []
+                            years_matches = sorted({pd.to_datetime(rec.get('fecha')).year for rec in f_list if rec.get('fecha')})
+                        except Exception:
+                            years_matches = []
+                        years = sorted(set(years_df + years_matches))
+                        year_options = ['Todos'] + [str(y) for y in years]
+                        default_idx = len(year_options)-1 if len(year_options) > 0 else 0
+                    except Exception:
+                        year_options = ['Todos']
+                        default_idx = 0
+                    sel_year = st.selectbox('Año', options=year_options, index=default_idx, key='fcb_imp_year')
+                with cols[3]:
                     # Text input para búsqueda en vivo; usamos session_state + on_change
                     def _fcb_search_changed():
                         # callback vacío: la rerun ocurre automáticamente al cambiar el valor
@@ -4995,6 +5665,12 @@ if display_results:
                     df_show = df_show[df_show['Impacto del partido'] > 0]
                 elif sign_filter == 'Disminución':
                     df_show = df_show[df_show['Impacto del partido'] < 0]
+                # aplicar filtro por año si el usuario seleccionó uno concreto
+                try:
+                    if sel_year and str(sel_year) != 'Todos':
+                        df_show = df_show[df_show['fecha'].dt.year == int(sel_year)]
+                except Exception:
+                    pass
                 df_show = df_show.head(int(top_n))
                 # Asegurar columna Hora solo si hay al menos una hora conocida;
                 # si no hay ninguna hora, omitimos la columna para evitar valores N/A.
@@ -5057,6 +5733,7 @@ if display_results:
                 hora_desc = val.get('hora')
             else:
                 partido_desc = val
+            partido_desc = _format_partido_with_competition(partido_desc, fecha_dt)
             impacto_rows_rm.append({
                 'fecha': fecha_dt,
                 'partido': partido_desc,
@@ -5070,12 +5747,28 @@ if display_results:
             df_imp_rm = df_imp_rm.rename(columns={'mean_prev': 'Media previa', 'pct_change': 'Impacto del partido'})
             with st.expander('Partidos RM con mayor impacto histórico (ordenados)', expanded=False):
                 st.markdown('Resumen de partidos RM detectados y su impacto relativo sobre ventas (comparado con media de hasta 3 días previos same-weekday).')
-                cols = st.columns([1,1,1,1])
+                cols = st.columns([1,1,1,1,1])
                 with cols[0]:
                     top_n_rm = st.number_input('Mostrar top N (RM)', min_value=1, max_value=50, value=10, step=1, key='top_n_rm')
                 with cols[1]:
                     sign_filter_rm = st.selectbox('Tipo (RM)', options=['Todos','Aumento','Disminución'], key='sign_filter_rm')
                 with cols[2]:
+                    try:
+                        years_df_rm = sorted(df_imp_rm['fecha'].dt.year.unique().tolist()) if 'fecha' in df_imp_rm.columns else []
+                        years_matches_rm = []
+                        try:
+                            r_list = st.session_state.get('rm_matches_list', []) or []
+                            years_matches_rm = sorted({pd.to_datetime(rec.get('fecha')).year for rec in r_list if rec.get('fecha')})
+                        except Exception:
+                            years_matches_rm = []
+                        years_rm = sorted(set(years_df_rm + years_matches_rm))
+                        year_options_rm = ['Todos'] + [str(y) for y in years_rm]
+                        default_idx_rm = len(year_options_rm)-1 if len(year_options_rm) > 0 else 0
+                    except Exception:
+                        year_options_rm = ['Todos']
+                        default_idx_rm = 0
+                    sel_year_rm = st.selectbox('Año (RM)', options=year_options_rm, index=default_idx_rm, key='rm_imp_year')
+                with cols[3]:
                     def _rm_search_changed():
                         return None
                     st.text_input('Buscar equipo (RM)', value='', placeholder='p.ej. Granada', key='rm_search', on_change=_rm_search_changed)
@@ -5092,6 +5785,12 @@ if display_results:
                     df_show_rm = df_show_rm[df_show_rm['Impacto del partido'] > 0]
                 elif sign_filter_rm == 'Disminución':
                     df_show_rm = df_show_rm[df_show_rm['Impacto del partido'] < 0]
+                # aplicar filtro por año si se seleccionó
+                try:
+                    if sel_year_rm and str(sel_year_rm) != 'Todos':
+                        df_show_rm = df_show_rm[df_show_rm['fecha'].dt.year == int(sel_year_rm)]
+                except Exception:
+                    pass
                 df_show_rm = df_show_rm.head(int(top_n_rm))
                 if 'Hora' in df_show_rm.columns:
                     if df_show_rm['Hora'].notna().any():
@@ -5206,6 +5905,11 @@ if display_results:
     })
     PLACEHOLDER_STR = ' - '
     df_prediccion_display['Ventas Reales'] = df_prediccion_display['Ventas Reales'].fillna(PLACEHOLDER_STR)
+    # Force string dtype to avoid pyarrow conversion errors when column mixes numbers and placeholders
+    try:
+        df_prediccion_display['Ventas Reales'] = df_prediccion_display['Ventas Reales'].astype('string')
+    except Exception:
+        pass
     # Columna FCB AÑO BASE: porcentaje de incremento asociado al partido en el año base
     def format_fcb_pct(x):
         try:
@@ -5362,15 +6066,22 @@ if display_results:
                         if fecha_key in rm_map:
                             val = rm_map.get(fecha_key)
                             if isinstance(val, dict):
-                                part = val.get('partido', '')
+                                # prefer formatted partido (may include competition label)
+                                formatted = _format_partido_with_competition(val, fecha_key)
                                 hora = val.get('hora')
-                                return f"{val}" if not isinstance(val, dict) else (f"{part} ({hora})" if hora else f"{part}")
+                                if formatted:
+                                    return f"{formatted} ({hora})" if hora else formatted
+                                part = val.get('partido', '')
+                                return f"{part} ({hora})" if hora else f"{part}"
                         if fecha_key in fcb_map:
                             val = fcb_map.get(fecha_key)
                             if isinstance(val, dict):
-                                part = val.get('partido', '')
+                                formatted = _format_partido_with_competition(val, fecha_key)
                                 hora = val.get('hora')
-                                return f"{val}" if not isinstance(val, dict) else (f"{part} ({hora})" if hora else f"{part}")
+                                if formatted:
+                                    return f"{formatted} ({hora})" if hora else formatted
+                                part = val.get('partido', '')
+                                return f"{part} ({hora})" if hora else f"{part}"
                     except Exception:
                         pass
                     return evt
@@ -5381,16 +6092,44 @@ if display_results:
                     if fecha_key in rm_map:
                         val = rm_map.get(fecha_key)
                         if isinstance(val, dict):
-                            part = val.get('partido', '')
+                            formatted = _format_partido_with_competition(val, fecha_key)
                             hora = val.get('hora')
-                            return f"RM vs {part} ({hora})" if hora else f"RM vs {part}"
+                            if formatted:
+                                # Si `formatted` ya contiene un separador 'vs', devolver tal cual
+                                if re.search(r"\bvs\b", formatted, flags=re.I) or re.search(r"\bv\b", formatted, flags=re.I):
+                                    # añadir hora sólo si no aparece ya
+                                    if hora and hora not in formatted:
+                                        return f"{formatted} ({hora})"
+                                    return formatted
+                                # si no contiene 'vs', construir etiqueta 'RM vs X'
+                                return f"RM vs {formatted} ({hora})" if hora else f"RM vs {formatted}"
+                            part = val.get('partido', '')
+                            # fallback similar para strings
+                            if part:
+                                if re.search(r"\bvs\b", part, flags=re.I) or re.search(r"\bv\b", part, flags=re.I):
+                                    if hora and hora not in part:
+                                        return f"{part} ({hora})"
+                                    return part
+                                return f"RM vs {part} ({hora})" if hora else f"RM vs {part}"
                         return str(val)
                     if fecha_key in fcb_map:
                         val = fcb_map.get(fecha_key)
                         if isinstance(val, dict):
-                            part = val.get('partido', '')
+                            formatted = _format_partido_with_competition(val, fecha_key)
                             hora = val.get('hora')
-                            return f"FCB vs {part} ({hora})" if hora else f"FCB vs {part}"
+                            if formatted:
+                                if re.search(r"\bvs\b", formatted, flags=re.I) or re.search(r"\bv\b", formatted, flags=re.I):
+                                    if hora and hora not in formatted:
+                                        return f"{formatted} ({hora})"
+                                    return formatted
+                                return f"FCB vs {formatted} ({hora})" if hora else f"FCB vs {formatted}"
+                            part = val.get('partido', '')
+                            if part:
+                                if re.search(r"\bvs\b", part, flags=re.I) or re.search(r"\bv\b", part, flags=re.I):
+                                    if hora and hora not in part:
+                                        return f"{part} ({hora})"
+                                    return part
+                                return f"FCB vs {part} ({hora})" if hora else f"FCB vs {part}"
                         return str(val)
                 except Exception:
                     pass
